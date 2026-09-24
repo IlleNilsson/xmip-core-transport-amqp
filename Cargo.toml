@@ -15,9 +15,11 @@ path = "src/lib.rs"
 
 [dependencies]
 # A Technology depends on its parent Capability, never the reverse
-# (repository-model.md). Standard library otherwise: AMQP is a frame
-# and typed arguments.
+# (repository-model.md). Codec and the standard library otherwise:
+# AMQP is a frame and typed arguments.
 transport = { package = "xmip-core-transport", git = "https://github.com/IlleNilsson/xmip-core-transport", branch = "main" }
+# The estate's encoding primitives: the byte cursor and writer AMQP 0-9-1 is read and written over.
+codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main" }
 
 [dev-dependencies]
 # The loopback payloads the tests drive, from the capability's test
