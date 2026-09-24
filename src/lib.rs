@@ -13,28 +13,34 @@
 //! needs, and no more.
 //!
 //! What is here is the handshake with PLAIN, one channel, durable queues,
-//! publish, consume and acknowledge. Publisher confirms, transactions, TLS
-//! and AMQP 1.0 — a different protocol under the same name — are the next
-//! layers.
+//! publish with a content header, consume and acknowledge — the one AMQP
+//! 0-9-1 in the estate: `wire` is the frame and its value encodings,
+//! `method` the methods, `content` the header and body frames, `client`
+//! and `session` the two ends. The `rabbitmq` technology speaks through
+//! them. Publisher confirms, transactions, TLS and AMQP 1.0 — a different
+//! protocol under the same name — are the next layers.
 //!
 //! The origin URI carries what the frame knew:
 //! `amqp://broker/exchange/routing.key?delivery-tag=1`.
 
 pub mod client;
-pub mod frame;
+pub mod content;
+pub mod method;
 pub mod session;
+pub mod wire;
 
 use std::net::TcpListener;
 use std::time::Duration;
 
-pub use client::{Client, Login};
-pub use frame::Frame;
-pub use session::{Event, Session};
+pub use client::{Client, Delivery, Login};
+pub use method::Method;
+pub use session::{Event, Publish, Queues, Session};
 use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 use transport::{Arrived, Directions, Transport};
+pub use wire::Frame;
 
 #[derive(Clone)]
 pub struct AmqpTransport {
@@ -92,12 +98,14 @@ impl AmqpTransport {
         socket::bind_tcp(&self.broker)
     }
 
-    /// Accept one client on an already-bound listener.
+    /// Accept one client on an already-bound listener, expecting this
+    /// transport's login.
     ///
     /// # Errors
-    /// Where the connection could not be accepted or the handshake failed.
+    /// Where the connection could not be accepted, the handshake failed,
+    /// or the client was refused.
     pub fn accept_one(&self, listener: &TcpListener) -> Result<Session> {
-        Session::accept(listener, self.timeout)
+        Session::accept(listener, &self.login, self.timeout)
     }
 
     /// Where a target names the broker, exchange and key itself —
@@ -130,31 +138,30 @@ impl Transport for AmqpTransport {
         Directions::BOTH
     }
 
-    /// Consume the queue and take what is delivered until the broker is
-    /// quiet for the timeout, or closes.
+    /// Declare and consume the queue and take what is delivered, each
+    /// acknowledged, until the broker is quiet for the timeout or closes.
+    /// A quiet queue is an empty vector, not an error.
     fn receive(&self) -> Result<Vec<Arrived>> {
         let mut client = self.connect()?;
-        client.declare_queue(&self.queue)?;
-        client.consume(&self.queue)?;
-        let mut arrived = Vec::new();
-        loop {
-            match client.next_delivery() {
-                Ok(Some(message)) => arrived.push(message),
-                Ok(None) => break,
-                Err(error) if error.retryable && !arrived.is_empty() => break,
-                Err(error) => return Err(error),
-            }
-        }
-        client.close();
-        Ok(arrived)
+        let deliveries = client.drain(&self.queue)?;
+        client.close()?;
+        Ok(deliveries
+            .into_iter()
+            .map(|delivery| {
+                let origin = format!(
+                    "amqp://{}/{}/{}?delivery-tag={}",
+                    self.broker, delivery.exchange, delivery.routing_key, delivery.delivery_tag
+                );
+                Arrived::new(origin, delivery.body)
+            })
+            .collect())
     }
 
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
         let (broker, exchange, key) = self.resolve(target);
         let mut client = Client::connect(broker, &self.login, self.timeout)?;
-        client.publish(exchange, key, bytes)?;
-        client.close();
-        Ok(())
+        client.publish(exchange, key, bytes, false)?;
+        client.close()
     }
 }
 
@@ -170,12 +177,19 @@ impl AmqpTransport {
 impl Accepting for AmqpTransport {
     fn take_one(&self, listener: &TcpListener) -> Result<Arrived> {
         let mut session = self.accept_one(listener)?;
-        let arrived = session
+        let publish = session
             .next_publish()?
             .ok_or_else(|| protocol_error("the client closed without publishing"))?;
-        // Serve the close that follows, so the goodbye is answered.
+        // The client closes the channel and the connection and waits for
+        // each -ok; serve them, and see the client go.
         session.next_publish()?;
-        Ok(arrived)
+        let origin = format!(
+            "amqp://{}/{}/{}",
+            session.peer(),
+            publish.exchange,
+            publish.routing_key
+        );
+        Ok(Arrived::new(origin, publish.body))
     }
 }
 
@@ -221,13 +235,16 @@ mod tests {
         let mut session = far_end.accept_one(&listener).expect("accepting");
         assert_eq!(session.user(), "guest");
         let first = session.next_publish().expect("first").expect("one");
-        assert_eq!(first.bytes, b"first");
-        assert!(first.origin_uri.ends_with("/orders/order.placed"));
+        assert_eq!(first.body, b"first");
+        assert_eq!(
+            (first.exchange.as_str(), first.queue()),
+            ("orders", "orders/order.placed".into())
+        );
         assert!(session.next_publish().expect("closed").is_none());
         let mut session = far_end.accept_one(&listener).expect("second");
         let second = session.next_publish().expect("second").expect("one");
-        assert_eq!(second.bytes, long, "three frames, one body");
-        assert!(second.origin_uri.ends_with("/other/key.two"));
+        assert_eq!(second.body, long, "many frames, one body");
+        assert_eq!(second.queue(), "other/key.two");
         assert!(session.next_publish().expect("closed").is_none());
         sender.join().expect("thread").expect("sending");
     }
@@ -253,9 +270,11 @@ mod tests {
             session.next_event().expect("consuming"),
             Some(Event::Consuming("orders.in".into()))
         );
-        session.deliver("order.placed", b"one").expect("one");
-        session.deliver("order.placed", b"two").expect("two");
+        session.deliver("orders.in", b"one").expect("one");
+        session.deliver("orders.in", b"two").expect("two");
         // Two acknowledgements, then the client's close.
+        assert_eq!(session.next_event().expect("ack"), Some(Event::Acked(1)));
+        assert_eq!(session.next_event().expect("ack"), Some(Event::Acked(2)));
         assert!(session.next_event().expect("close").is_none());
         let arrived = receiver.join().expect("thread").expect("receiving");
         assert_eq!(arrived.len(), 2);
@@ -263,8 +282,70 @@ mod tests {
         assert!(
             arrived[1]
                 .origin_uri
-                .ends_with("/order.placed?delivery-tag=2")
+                .ends_with("//orders.in?delivery-tag=2"),
+            "the default exchange, the queue as the key"
         );
+    }
+
+    #[test]
+    fn a_session_delivers_what_it_is_given_while_the_client_listens() {
+        let far_end = node();
+        let (listener, address) = far_end.bind().expect("binding");
+        let receiver = std::thread::spawn(move || {
+            let near = AmqpTransport::new(address, "", "prices", "prices")
+                .timing_out_after(Duration::from_secs(2));
+            let mut client = near.connect()?;
+            let tag = client.consume("prices")?;
+            let first = client.next_delivery()?.expect("first");
+            client.ack(first.delivery_tag)?;
+            let second = client.next_delivery()?;
+            Ok::<_, transport::TransportError>((tag, first, second))
+        });
+        let mut session = far_end.accept_one(&listener).expect("accepting");
+        assert_eq!(
+            session.next_event().expect("consuming"),
+            Some(Event::Consuming("prices".to_string()))
+        );
+        session.deliver("prices", b"42").expect("delivered");
+        assert_eq!(session.next_event().expect("acked"), Some(Event::Acked(1)));
+        drop(session);
+        let (tag, first, second) = receiver.join().expect("thread").expect("listening");
+        assert!(tag.starts_with("xmip."));
+        assert_eq!(first.body, b"42");
+        assert_eq!(
+            (first.exchange.as_str(), first.routing_key.as_str()),
+            ("", "prices")
+        );
+        assert_eq!(first.delivery_tag, 1);
+        assert!(second.is_none(), "the broker closed");
+    }
+
+    #[test]
+    fn a_quiet_queue_is_nothing_received_and_a_wrong_login_is_refused() {
+        let far_end = node();
+        let (listener, address) = far_end.bind().expect("binding");
+        let near = address.clone();
+        let receiver = std::thread::spawn(move || {
+            AmqpTransport::new(near, "orders", "order.placed", "orders.in")
+                .timing_out_after(Duration::from_millis(300))
+                .receive()
+        });
+        let mut session = far_end.accept_one(&listener).expect("accepting");
+        while session.next_event().expect("serving").is_some() {}
+        let arrived = receiver.join().expect("thread").expect("quiet");
+        assert!(arrived.is_empty());
+        let stranger = std::thread::spawn(move || {
+            AmqpTransport::new(address, "e", "k", "q")
+                .logging_in(Login::new("guest", "wrong"))
+                .timing_out_after(Duration::from_secs(2))
+                .connect()
+                .err()
+                .expect("refused")
+        });
+        let refused = far_end.accept_one(&listener).err().expect("refused");
+        assert!(refused.message.contains("403"), "{refused}");
+        let error = stranger.join().expect("thread");
+        assert!(!error.retryable, "{error}");
     }
 
     #[test]
