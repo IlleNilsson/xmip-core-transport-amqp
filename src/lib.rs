@@ -175,7 +175,7 @@ impl AmqpTransport {
 }
 
 impl Accepting for AmqpTransport {
-    fn take_one(&self, listener: &TcpListener) -> Result<Arrived> {
+    fn take_one(self, listener: &TcpListener) -> Result<Arrived> {
         let mut session = self.accept_one(listener)?;
         let publish = session
             .next_publish()?
@@ -195,8 +195,7 @@ impl Accepting for AmqpTransport {
 
 impl Loopback for AmqpTransport {
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
-        let (listener, address) = self.bind()?;
-        Ok(Box::new(Listening::new(self.clone(), listener, address)))
+        Ok(Box::new(Listening::new(self.clone(), self.bind()?)))
     }
 
     /// A fresh client to `address`, publishing to this transport's exchange
