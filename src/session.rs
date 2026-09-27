@@ -131,7 +131,9 @@ impl Session {
         session.say(0, &method::connection_start())?;
         let start_ok = session.expect(0, CONNECTION_START_OK, "connection.start-ok")?;
         let (user, password) = method::login_of(&start_ok)?;
-        if user != expected.user || password != expected.password {
+        if user != expected.user
+            || !codec::constant_time::equal(password.as_bytes(), expected.password.as_bytes())
+        {
             return session.refuse(403, "ACCESS_REFUSED - login was refused");
         }
         session.user = user;
