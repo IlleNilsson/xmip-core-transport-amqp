@@ -6,8 +6,8 @@
 //! close-ok; channel open, open-ok, close and close-ok; queue declare and
 //! declare-ok; basic consume, consume-ok, publish, deliver and ack. That is
 //! the whole of what a Location that declares, publishes, consumes and
-//! acknowledges says and hears. Exchanges, bindings, transactions and
-//! publisher confirms are not here.
+//! acknowledges says and hears. Publisher confirms are `confirm.rs`'s;
+//! exchanges, bindings and transactions are not here.
 //!
 //! Bits pack eight to an octet in the order a method lists them; no method
 //! here has more than five in a row, so every bit field is one octet.

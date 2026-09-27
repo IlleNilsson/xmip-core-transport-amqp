@@ -17,14 +17,23 @@
 //! 0-9-1 in the estate: `wire` is the frame and its value encodings,
 //! `method` the methods, `content` the header and body frames, `client`
 //! and `session` the two ends. The `rabbitmq` technology speaks through
-//! them. Publisher confirms, transactions, TLS and AMQP 1.0 — a different
-//! protocol under the same name — are the next layers.
+//! them. Publisher confirms are `confirm`'s, since 2026-09-26. Transactions,
+//! TLS and AMQP 1.0 — a different protocol under the same name — are the
+//! next layers.
 //!
 //! The origin URI carries what the frame knew:
 //! `amqp://broker/exchange/routing.key?delivery-tag=1`.
+//!
+//! The event capability rides this transport (ADR-0065 clause 3):
+//! [`event_wire`] publishes a `WireEvent` confirmed — the content
+//! type in the basic properties, the `cloudEvents_` attributes in the
+//! headers field table, 0-9-1's equivalent of the 1.0 binding's
+//! application-properties — and reads one back off a delivery.
 
 pub mod client;
+pub mod confirm;
 pub mod content;
+pub mod event_wire;
 pub mod method;
 pub mod session;
 pub mod wire;
@@ -39,8 +48,9 @@ use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
-use transport::{Arrived, Directions, Transport};
+use transport::{Arrived, Configured, Directions, Transport};
 pub use wire::Frame;
+use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
 
 #[derive(Clone)]
 pub struct AmqpTransport {
@@ -165,6 +175,74 @@ impl Transport for AmqpTransport {
     }
 }
 
+impl Configured for AmqpTransport {
+    /// The address is the broker, `host:5672`. The user and password are
+    /// the Location's credentials, not settings: a secret never is.
+    const SETTINGS: &'static Settings = &Settings {
+        technology: env!("CARGO_PKG_NAME"),
+        settings: &[
+            Setting {
+                name: "queue",
+                kind: Kind::Text,
+                presence: Presence::Required,
+                meaning: "The queue a Receive Location declares and consumes.",
+                applies: Applies::Receive,
+            },
+            Setting {
+                name: "exchange",
+                kind: Kind::Text,
+                presence: Presence::Optional,
+                meaning: "The exchange a Send Location publishes to; the broker's default \
+                          exchange when left out.",
+                applies: Applies::Send,
+            },
+            Setting {
+                name: "routing_key",
+                kind: Kind::Text,
+                presence: Presence::Optional,
+                meaning: "The routing key published under when a send target names none.",
+                applies: Applies::Send,
+            },
+            Setting {
+                name: "virtual_host",
+                kind: Kind::Text,
+                presence: Presence::Optional,
+                meaning: "The broker's virtual host connected to; the default virtual host \
+                          when left out.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "timeout",
+                kind: Kind::Duration,
+                presence: Presence::Optional,
+                meaning: "How long a peer that stops mid-frame is waited on, and how long a \
+                          receive waits on a quiet broker; unbounded when left out.",
+                applies: Applies::Both,
+            },
+        ],
+    };
+
+    fn configured(address: &str, settings: &xcore::settings::Read) -> Result<Self> {
+        let text = |name| settings.optional_text(name).unwrap_or_default();
+        // The user and password come through the Location's credentials.
+        let login = match settings.optional_text("virtual_host") {
+            Some(virtual_host) => Login::default().on(virtual_host),
+            None => Login::default(),
+        };
+        let transport = Self::new(
+            address,
+            text("exchange"),
+            text("routing_key"),
+            text("queue"),
+        )
+        .logging_in(login);
+        Ok(match settings.optional_duration("timeout") {
+            Some(timeout) => transport.timing_out_after(timeout),
+            None => transport,
+        })
+    }
+}
+
 impl AmqpTransport {
     /// Both ends on this machine: an ephemeral local port, the loopback
     /// timeout, an exchange, a routing key and a queue each called `probe`.
@@ -213,10 +291,41 @@ impl Loopback for AmqpTransport {
 mod tests {
     use super::*;
     use transport::payload::{edge_payloads, sized_payloads};
+    use xcore::settings::Given;
 
     fn node() -> AmqpTransport {
         AmqpTransport::new("127.0.0.1:0", "orders", "order.placed", "orders.in")
             .timing_out_after(Duration::from_secs(2))
+    }
+
+    #[test]
+    fn amqp_declares_its_settings_and_reads_through_them() {
+        assert_eq!(AmqpTransport::SETTINGS.problems(), Vec::<String>::new());
+        let text = |name: &str, value: &str| (name.to_string(), Given::Text(value.to_string()));
+        let sent = AmqpTransport::open(
+            "broker:5672",
+            Applies::Send,
+            &[
+                text("exchange", "orders"),
+                text("routing_key", "order.placed"),
+                text("virtual_host", "trade"),
+                text("timeout", "2s"),
+            ],
+        )
+        .expect("built");
+        assert_eq!(sent.broker, "broker:5672");
+        assert_eq!(sent.exchange, "orders");
+        assert_eq!(sent.routing_key, "order.placed");
+        assert_eq!(sent.login.virtual_host, "trade");
+        assert_eq!(sent.timeout, Some(Duration::from_secs(2)));
+        let received = AmqpTransport::open("broker:5672", Applies::Receive, &[text("queue", "in")])
+            .expect("built");
+        assert_eq!(received.queue, "in");
+        assert_eq!(received.login.virtual_host, "/");
+        let Err(refused) = AmqpTransport::open("broker:5672", Applies::Receive, &[]) else {
+            panic!("a Receive Location's queue is required");
+        };
+        assert!(refused.message.contains("\"queue\""), "{refused}");
     }
 
     #[test]
