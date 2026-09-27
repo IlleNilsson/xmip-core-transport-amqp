@@ -8,7 +8,8 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use transport::error::{Result, TransportError, classify, protocol_error};
-use transport::socket;
+use transport::pool::{Pooled, alive};
+use transport::{Login, socket};
 
 use crate::confirm::{self, CONFIRM_SELECT_OK, Confirmed};
 use crate::content::{self, Properties};
@@ -20,21 +21,19 @@ use crate::method::{
 use crate::wire::{Frame, Kind, MAX_FRAME, PROTOCOL_HEADER, len32, read_frame};
 
 /// What a Location presents when it connects, and what a [`crate::Session`]
-/// expects.
+/// expects: the login, and the virtual host it opens.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Login {
-    pub user: String,
-    pub password: String,
+pub struct Credentials {
+    pub login: Login,
     pub virtual_host: String,
 }
 
-impl Login {
+impl Credentials {
     /// `user` and `password` on the default virtual host `/`.
     #[must_use]
     pub fn new(user: &str, password: &str) -> Self {
         Self {
-            user: user.to_string(),
-            password: password.to_string(),
+            login: Login::new(user, password),
             virtual_host: "/".to_string(),
         }
     }
@@ -47,7 +46,7 @@ impl Login {
     }
 }
 
-impl Default for Login {
+impl Default for Credentials {
     /// What a fresh broker accepts from the local machine.
     fn default() -> Self {
         Self::new("guest", "guest")
@@ -77,12 +76,17 @@ pub struct Client {
 
 impl Client {
     /// Connect to `broker` and complete the connection and channel
-    /// handshake as `login`.
+    /// handshake presenting `credentials`.
     ///
     /// # Errors
     /// Where the broker could not be reached, refused the login or the
     /// virtual host, or did not speak AMQP 0-9-1.
-    pub fn connect(broker: &str, login: &Login, timeout: Option<Duration>) -> Result<Self> {
+    pub fn connect(
+        broker: &str,
+        credentials: &Credentials,
+        timeout: Option<Duration>,
+    ) -> Result<Self> {
+        let login = &credentials.login;
         let stream = socket::connect_tcp(broker, timeout)?;
         let (reader, writer) = socket::split(stream)?;
         let mut client = Self {
@@ -106,7 +110,7 @@ impl Client {
         };
         client.frame_max = frame_max as usize;
         client.say(0, &method::tune(CONNECTION_TUNE_OK, channel_max, frame_max))?;
-        client.say(0, &method::connection_open(&login.virtual_host))?;
+        client.say(0, &method::connection_open(&credentials.virtual_host))?;
         client.expect(0, CONNECTION_OPEN_OK, "connection.open-ok")?;
         client.say(1, &method::channel_open())?;
         client.expect(1, CHANNEL_OPEN_OK, "channel.open-ok")?;
@@ -382,5 +386,14 @@ impl Client {
         self.writer
             .flush()
             .map_err(|e| classify("flushing a frame", &e))
+    }
+}
+
+impl Pooled for Client {
+    /// While the broker has closed neither the connection nor the channel.
+    /// Tune-ok asks for no heartbeat, so an idle connection is not closed
+    /// for silence.
+    fn usable(&mut self) -> bool {
+        !self.closed && alive(&self.writer)
     }
 }

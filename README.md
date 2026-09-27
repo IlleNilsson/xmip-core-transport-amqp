@@ -11,6 +11,12 @@ byte cursor and writer), `method`, `content` (the header and body frames), `clie
 broker). [xmip-core-transport-rabbitmq](https://github.com/IlleNilsson/xmip-core-transport-rabbitmq)
 speaks through them rather than carrying its own.
 
+A Send Location publishes on a connection kept per broker
+(`transport::Pool`), its channel in confirm mode, and a publish returns
+once the broker confirms it; until 2026-09-27 every send connected,
+published without a confirm and closed. What a Location presents is
+`Credentials`: the transport capability's `Login` and the virtual host.
+
 ## Properties, publisher confirms, and the event capability's wire events
 
 A content header carries three of the basic class's properties
@@ -37,8 +43,10 @@ AMQP binding is written for AMQP 1.0, where the attributes are
 application-properties; AMQP 0-9-1 has none, and its headers table is where
 an application's own named values go, so it is their equivalent here, the
 names and the prefix unchanged. The identity presented for a Party is the
-`Login` configured for it (ADR-0019 clause 3). One connection per Party is
-kept between events. `event_wire::carried` is the read side: a
+`Credentials` configured for it (ADR-0019 clause 3): the transport
+capability's `Login` and the virtual host. The connections to each Party
+are the capability's `Pool`, kept between events; one that fails is
+replaced and the event published again. `event_wire::carried` is the read side: a
 delivery's properties and body, as the binding reads a `WireEvent` from.
 `tests/event_wire.rs` holds publish to far-end receipt to a millisecond at
 the median and five at the 99th percentile, apart from load.

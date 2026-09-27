@@ -22,27 +22,27 @@
 //! it: at least once, the resilience guards deciding each attempt. A
 //! `basic.nack` is retryable.
 //!
-//! **The identity presented** is the [`Login`] configured for the Party,
-//! as ADR-0019 clause 3 has a Send side present the identity configured
-//! for the Party it reaches: the PLAIN user and password this transport
-//! connects with, on the virtual host it names. One connection per Party
-//! is kept open between events; a failed attempt drops it and the next
-//! connects afresh.
+//! **The identity presented** is the [`Credentials`] configured for the
+//! Party, as ADR-0019 clause 3 has a Send side present the identity
+//! configured for the Party it reaches: the PLAIN user and password this
+//! transport connects with, on the virtual host it names. The connections
+//! to each Party are the capability's [`Pool`], kept open between events;
+//! one that fails is dropped, and the event goes again on a new one.
 
 use std::collections::BTreeMap;
-use std::collections::btree_map::Entry as Slot;
-use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use event::binding::Carried;
 use event::forward::Wire;
-use resilience::Failure;
+use transport::Pool;
+use xcore::Failure;
 use xcore::PartyId;
 
-use crate::client::{Client, Login};
+use crate::client::{Client, Credentials};
 use crate::content::Properties;
 
-/// Where one Party's events are published, and the login presented there.
+/// Where one Party's events are published, and the credentials presented
+/// there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Exchange {
     /// The broker, `host:port`.
@@ -50,45 +50,45 @@ pub struct Exchange {
     /// The exchange: empty for the default one, which routes by queue name.
     pub exchange: String,
     pub routing_key: String,
-    pub login: Login,
+    pub credentials: Credentials,
 }
 
 impl Exchange {
     /// `exchange` under `routing_key` on the broker at `broker`, presenting
-    /// the default login.
+    /// the default credentials.
     #[must_use]
     pub fn new(broker: impl Into<String>, exchange: &str, routing_key: &str) -> Self {
         Self {
             broker: broker.into(),
             exchange: exchange.to_string(),
             routing_key: routing_key.to_string(),
-            login: Login::default(),
+            credentials: Credentials::default(),
         }
     }
 
-    /// Present `login` rather than the default.
+    /// Present `credentials` rather than the default.
     #[must_use]
-    pub fn presenting(mut self, login: Login) -> Self {
-        self.login = login;
+    pub fn presenting(mut self, credentials: Credentials) -> Self {
+        self.credentials = credentials;
         self
     }
 }
 
-/// The AMQP wire: each Party's exchange, and a connection kept to each.
+/// The AMQP wire: each Party's exchange, and the connections kept to each.
 pub struct EventWire {
     exchanges: BTreeMap<PartyId, Exchange>,
     timeout: Option<Duration>,
-    connections: Mutex<BTreeMap<PartyId, Client>>,
+    connections: Pool<Client, PartyId>,
 }
 
 impl EventWire {
     /// A wire configured for no Party yet.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             exchanges: BTreeMap::new(),
             timeout: None,
-            connections: Mutex::new(BTreeMap::new()),
+            connections: Pool::new(),
         }
     }
 
@@ -120,22 +120,20 @@ impl Wire for EventWire {
             Failure::permanent(format!("no AMQP exchange is configured for Party {party}"))
         })?;
         let properties = properties(carried);
-        let mut connections = self
-            .connections
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let client = match connections.entry(party) {
-            Slot::Occupied(open) => open.into_mut(),
-            Slot::Vacant(slot) => {
-                slot.insert(Client::connect(&to.broker, &to.login, self.timeout)?)
-            }
-        };
-        let published =
-            client.publish_confirmed(&to.exchange, &to.routing_key, &properties, &carried.body);
-        published.map_err(|error| {
-            connections.remove(&party);
-            error.into()
-        })
+        self.connections
+            .exchange(
+                &party,
+                || Client::connect(&to.broker, &to.credentials, self.timeout),
+                |client| {
+                    client.publish_confirmed(
+                        &to.exchange,
+                        &to.routing_key,
+                        &properties,
+                        &carried.body,
+                    )
+                },
+            )
+            .map_err(Failure::from)
     }
 }
 
@@ -183,12 +181,12 @@ mod tests {
         let refused = wire
             .carry(PartyId::new(2), &Carried::default())
             .expect_err("no exchange");
-        assert!(!refused.is_retryable());
-        assert!(refused.reason.contains("no AMQP exchange"), "{refused}");
+        assert!(!refused.retryable);
+        assert!(refused.message.contains("no AMQP exchange"), "{refused}");
         let unreachable = wire
             .timing_out_after(Duration::from_secs(1))
             .carry(PartyId::new(1), &Carried::default())
             .expect_err("nothing listens");
-        assert!(unreachable.is_retryable(), "{unreachable}");
+        assert!(unreachable.retryable, "{unreachable}");
     }
 }
