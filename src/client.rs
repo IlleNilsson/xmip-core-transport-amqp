@@ -1,14 +1,17 @@
 //! The client's side of one connection to a broker: the handshake with
-//! PLAIN, one channel, declare, publish, consume, deliver, acknowledge.
+//! PLAIN, one channel, declare, publish, consume, deliver, acknowledge —
+//! and publish confirmed, where the channel is in confirm mode
+//! (`confirm.rs`) and a publish returns once the broker took it.
 
 use std::io::{BufReader, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-use transport::error::{Result, classify, protocol_error};
+use transport::error::{Result, TransportError, classify, protocol_error};
 use transport::socket;
 
-use crate::content;
+use crate::confirm::{self, CONFIRM_SELECT_OK, Confirmed};
+use crate::content::{self, Properties};
 use crate::method::{
     self, BASIC_CONSUME_OK, BASIC_DELIVER, CHANNEL_CLOSE, CHANNEL_CLOSE_OK, CHANNEL_OPEN_OK,
     CONNECTION_CLOSE, CONNECTION_CLOSE_OK, CONNECTION_OPEN_OK, CONNECTION_START, CONNECTION_TUNE,
@@ -52,12 +55,13 @@ impl Default for Login {
 }
 
 /// One basic.deliver as the broker sent it: where it was published, the
-/// tag to acknowledge it by, and the body.
+/// tag to acknowledge it by, its properties and the body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Delivery {
     pub exchange: String,
     pub routing_key: String,
     pub delivery_tag: u64,
+    pub properties: Properties,
     pub body: Vec<u8>,
 }
 
@@ -67,6 +71,8 @@ pub struct Client {
     writer: TcpStream,
     frame_max: usize,
     closed: bool,
+    /// In confirm mode, how many publishes the channel has numbered.
+    confirming: Option<u64>,
 }
 
 impl Client {
@@ -84,6 +90,7 @@ impl Client {
             writer,
             frame_max: MAX_FRAME,
             closed: false,
+            confirming: None,
         };
         client.write(PROTOCOL_HEADER)?;
         client.expect(0, CONNECTION_START, "connection.start")?;
@@ -135,11 +142,89 @@ impl Client {
         body: &[u8],
         persistent: bool,
     ) -> Result<()> {
-        self.say(1, &method::basic_publish(exchange, routing_key))?;
-        for frame in content::frames(1, body, self.frame_max, persistent) {
-            self.write(&frame.encode())?;
+        self.publish_with(exchange, routing_key, &Properties::octets(persistent), body)
+    }
+
+    /// Publish `body` to `exchange` under `routing_key` with `properties`
+    /// in its content header, the body split at the negotiated frame size.
+    ///
+    /// # Errors
+    /// Where the broker went away.
+    pub fn publish_with(
+        &mut self,
+        exchange: &str,
+        routing_key: &str,
+        properties: &Properties,
+        body: &[u8],
+    ) -> Result<()> {
+        // One write for the method, its header and its body: three would
+        // each wait on the one before under Nagle's algorithm.
+        let mut frames = method::basic_publish(exchange, routing_key)
+            .frame(1)
+            .encode();
+        for frame in content::frames(1, properties, body, self.frame_max) {
+            frames.extend(frame.encode());
+        }
+        self.write(&frames)?;
+        if let Some(numbered) = self.confirming.as_mut() {
+            *numbered += 1;
         }
         Ok(())
+    }
+
+    /// Put the channel in confirm mode, once: every publish after it is
+    /// numbered and answered by the broker.
+    ///
+    /// # Errors
+    /// Where the broker refused confirms or went away.
+    pub fn confirm(&mut self) -> Result<()> {
+        if self.confirming.is_none() {
+            self.say(1, &confirm::select())?;
+            self.expect(1, CONFIRM_SELECT_OK, "confirm.select-ok")?;
+            self.confirming = Some(0);
+        }
+        Ok(())
+    }
+
+    /// [`Client::publish_with`], in confirm mode, returning once the broker
+    /// took it: at least once.
+    ///
+    /// # Errors
+    /// Where the broker did not take it (`basic.nack`, retryable), closed
+    /// the channel, or went away.
+    pub fn publish_confirmed(
+        &mut self,
+        exchange: &str,
+        routing_key: &str,
+        properties: &Properties,
+        body: &[u8],
+    ) -> Result<()> {
+        self.confirm()?;
+        self.publish_with(exchange, routing_key, properties, body)?;
+        let number = self.confirming.unwrap_or_default();
+        loop {
+            let Some(frame) = read_frame(&mut self.reader)? else {
+                self.closed = true;
+                return Err(protocol_error("the broker closed before confirming"));
+            };
+            match frame.kind {
+                Kind::Heartbeat => self.heartbeat()?,
+                Kind::Method => {
+                    let method = Method::of(&frame)?;
+                    match Confirmed::of(&method)? {
+                        Some(said) if said.answers(number) && said.taken => return Ok(()),
+                        Some(said) if said.answers(number) => {
+                            return Err(TransportError::retryable(
+                                "the broker did not take the publish (basic.nack)",
+                            ));
+                        }
+                        Some(_) => {}
+                        None => self.closed_by(frame.channel, &method, "a confirm")?,
+                    }
+                }
+                Kind::Header | Kind::Body => {}
+            }
+        }
     }
 
     /// Consume `queue`, each delivery acknowledged by [`Client::ack`]; the
@@ -234,11 +319,12 @@ impl Client {
     /// A deliver and the content after it.
     fn delivery(&mut self, method: &Method) -> Result<Delivery> {
         let (delivery_tag, exchange, routing_key) = method::deliver_of(method)?;
-        let body = content::read(&mut self.reader)?;
+        let (properties, body) = content::read(&mut self.reader)?;
         Ok(Delivery {
             exchange,
             routing_key,
             delivery_tag,
+            properties,
             body,
         })
     }

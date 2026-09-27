@@ -9,6 +9,11 @@
 //! kept for one. No exchanges, no bindings, nothing on disk: a publish to
 //! an exchange is kept under `exchange/routing-key`. A Location that needs
 //! those talks to a broker through [`crate::Client`].
+//!
+//! A client that puts its channel in confirm mode has each publish
+//! answered `basic.ack` once it is kept — or `basic.nack` while
+//! [`Session::nacking`], which is how a far end shows a publisher a broker
+//! that could not take a message, and the publisher's retry.
 
 use std::collections::BTreeMap;
 use std::io::{BufReader, Read, Write};
@@ -19,7 +24,8 @@ use transport::error::{Result, classify, protocol_error};
 use transport::socket;
 
 use crate::client::Login;
-use crate::content;
+use crate::confirm::{self, CONFIRM_SELECT};
+use crate::content::{self, Properties};
 use crate::method::{
     self, BASIC_ACK, BASIC_CONSUME, BASIC_PUBLISH, CHANNEL_CLOSE, CHANNEL_CLOSE_OK, CHANNEL_OPEN,
     CONNECTION_CLOSE, CONNECTION_CLOSE_OK, CONNECTION_OPEN, CONNECTION_START_OK, CONNECTION_TUNE,
@@ -27,11 +33,12 @@ use crate::method::{
 };
 use crate::wire::{Frame, Kind, MAX_FRAME, PROTOCOL_HEADER, len32, read_frame};
 
-/// One basic.publish as the client sent it.
+/// One basic.publish as the client sent it, its properties and its body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Publish {
     pub exchange: String,
     pub routing_key: String,
+    pub properties: Properties,
     pub body: Vec<u8>,
 }
 
@@ -80,6 +87,9 @@ pub struct Session {
     queues: Queues,
     consumer: Option<Consumer>,
     delivery_tag: u64,
+    /// In confirm mode, how many publishes the channel has numbered.
+    confirming: Option<u64>,
+    nacking: u32,
 }
 
 impl Session {
@@ -106,6 +116,8 @@ impl Session {
             queues: Queues::new(),
             consumer: None,
             delivery_tag: 0,
+            confirming: None,
+            nacking: 0,
         };
         let mut header = [0u8; 8];
         session
@@ -140,6 +152,14 @@ impl Session {
         Err(protocol_error(format!(
             "the client was refused: {code} {text}"
         )))
+    }
+
+    /// Answer the next `times` confirmed publishes `basic.nack`, keeping
+    /// nothing of them.
+    #[must_use]
+    pub const fn nacking(mut self, times: u32) -> Self {
+        self.nacking = times;
+        self
     }
 
     /// Hold these queues, the way one session hands its state to the next.
@@ -249,13 +269,23 @@ impl Session {
                     }
                     Event::Consuming(queue)
                 }
+                CONFIRM_SELECT => {
+                    self.say(channel, &Method::bare(confirm::CONFIRM_SELECT_OK))?;
+                    self.confirming = Some(0);
+                    continue;
+                }
                 BASIC_PUBLISH => {
                     let (exchange, routing_key) = method::publish_of(&method)?;
+                    let (properties, body) = content::read(&mut self.reader)?;
                     let publish = Publish {
                         exchange,
                         routing_key,
-                        body: content::read(&mut self.reader)?,
+                        properties,
+                        body,
                     };
+                    if !self.confirmed(channel)? {
+                        continue;
+                    }
                     self.deliver(&publish.queue(), &publish.body)?;
                     Event::Published(publish)
                 }
@@ -272,6 +302,23 @@ impl Session {
             };
             return Ok(Some(event));
         }
+    }
+
+    /// In confirm mode, answer the publish just read: `basic.nack` while
+    /// nacking, and whether it was taken; outside it, taken.
+    fn confirmed(&mut self, channel: u16) -> Result<bool> {
+        let Some(numbered) = self.confirming.as_mut() else {
+            return Ok(true);
+        };
+        *numbered += 1;
+        let number = *numbered;
+        if self.nacking > 0 {
+            self.nacking -= 1;
+            self.say(channel, &confirm::basic_nack(number))?;
+            return Ok(false);
+        }
+        self.say(channel, &method::basic_ack(number))?;
+        Ok(true)
     }
 
     /// Deliver `body` on `queue`, through the default exchange: as a
@@ -296,7 +343,7 @@ impl Session {
         self.delivery_tag += 1;
         let deliver = method::basic_deliver(&tag, self.delivery_tag, "", queue);
         self.say(channel, &deliver)?;
-        for frame in content::frames(channel, body, MAX_FRAME, true) {
+        for frame in content::frames(channel, &Properties::octets(true), body, MAX_FRAME) {
             self.write(&frame.encode())?;
         }
         Ok(())
