@@ -41,14 +41,15 @@ pub mod wire;
 use std::net::TcpListener;
 use std::time::Duration;
 
-pub use client::{Client, Delivery, Login};
+pub use client::{Client, Credentials, Delivery};
+use content::Properties;
 pub use method::Method;
 pub use session::{Event, Publish, Queues, Session};
 use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
-use transport::{Arrived, Configured, Directions, Transport};
+use transport::{Arrived, Configured, Directions, Pool, Transport};
 pub use wire::Frame;
 use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
 
@@ -58,8 +59,11 @@ pub struct AmqpTransport {
     exchange: String,
     routing_key: String,
     queue: String,
-    login: Login,
+    credentials: Credentials,
     timeout: Option<Duration>,
+    /// The connections a send publishes on, each with its channel open and
+    /// in confirm mode: connected once per broker and kept.
+    publishers: Pool<Client>,
 }
 
 impl AmqpTransport {
@@ -72,15 +76,16 @@ impl AmqpTransport {
             exchange: exchange.to_string(),
             routing_key: routing_key.to_string(),
             queue: queue.to_string(),
-            login: Login::default(),
+            credentials: Credentials::default(),
             timeout: None,
+            publishers: Pool::new(),
         }
     }
 
     /// Present these when connecting.
     #[must_use]
-    pub fn logging_in(mut self, login: Login) -> Self {
-        self.login = login;
+    pub fn logging_in(mut self, credentials: Credentials) -> Self {
+        self.credentials = credentials;
         self
     }
 
@@ -97,7 +102,7 @@ impl AmqpTransport {
     /// # Errors
     /// Where the broker refused or could not be reached.
     pub fn connect(&self) -> Result<Client> {
-        Client::connect(&self.broker, &self.login, self.timeout)
+        Client::connect(&self.broker, &self.credentials, self.timeout)
     }
 
     /// Bind as the far end clients connect to, and report the address.
@@ -115,7 +120,7 @@ impl AmqpTransport {
     /// Where the connection could not be accepted, the handshake failed,
     /// or the client was refused.
     pub fn accept_one(&self, listener: &TcpListener) -> Result<Session> {
-        Session::accept(listener, &self.login, self.timeout)
+        Session::accept(listener, &self.credentials, self.timeout)
     }
 
     /// Where a target names the broker, exchange and key itself —
@@ -167,11 +172,17 @@ impl Transport for AmqpTransport {
             .collect())
     }
 
+    /// Publish on the connection kept for the broker, connected on the
+    /// first send to it, and return once the broker confirms it took the
+    /// message: the confirm, not a close, is what says it arrived.
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
         let (broker, exchange, key) = self.resolve(target);
-        let mut client = Client::connect(broker, &self.login, self.timeout)?;
-        client.publish(exchange, key, bytes, false)?;
-        client.close()
+        let properties = Properties::octets(false);
+        self.publishers.exchange(
+            broker,
+            || Client::connect(broker, &self.credentials, self.timeout),
+            |client| client.publish_confirmed(exchange, key, &properties, bytes),
+        )
     }
 }
 
@@ -225,9 +236,9 @@ impl Configured for AmqpTransport {
     fn configured(address: &str, settings: &xcore::settings::Read) -> Result<Self> {
         let text = |name| settings.optional_text(name).unwrap_or_default();
         // The user and password come through the Location's credentials.
-        let login = match settings.optional_text("virtual_host") {
-            Some(virtual_host) => Login::default().on(virtual_host),
-            None => Login::default(),
+        let credentials = match settings.optional_text("virtual_host") {
+            Some(virtual_host) => Credentials::default().on(virtual_host),
+            None => Credentials::default(),
         };
         let transport = Self::new(
             address,
@@ -235,7 +246,7 @@ impl Configured for AmqpTransport {
             text("routing_key"),
             text("queue"),
         )
-        .logging_in(login);
+        .logging_in(credentials);
         Ok(match settings.optional_duration("timeout") {
             Some(timeout) => transport.timing_out_after(timeout),
             None => transport,
@@ -255,12 +266,11 @@ impl AmqpTransport {
 impl Accepting for AmqpTransport {
     fn take_one(self, listener: &TcpListener) -> Result<Arrived> {
         let mut session = self.accept_one(listener)?;
+        // The confirm goes out as the publish is read; the client keeps its
+        // connection for the next.
         let publish = session
             .next_publish()?
             .ok_or_else(|| protocol_error("the client closed without publishing"))?;
-        // The client closes the channel and the connection and waits for
-        // each -ok; serve them, and see the client go.
-        session.next_publish()?;
         let origin = format!(
             "amqp://{}/{}/{}",
             session.peer(),
@@ -276,8 +286,8 @@ impl Loopback for AmqpTransport {
         Ok(Box::new(Listening::new(self.clone(), self.bind()?)))
     }
 
-    /// A fresh client to `address`, publishing to this transport's exchange
-    /// under its routing key, and the connection closed before it returns.
+    /// A client to `address`, publishing to this transport's exchange under
+    /// its routing key, confirmed before it returns.
     fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
         Self {
             broker: address.to_string(),
@@ -316,12 +326,12 @@ mod tests {
         assert_eq!(sent.broker, "broker:5672");
         assert_eq!(sent.exchange, "orders");
         assert_eq!(sent.routing_key, "order.placed");
-        assert_eq!(sent.login.virtual_host, "trade");
+        assert_eq!(sent.credentials.virtual_host, "trade");
         assert_eq!(sent.timeout, Some(Duration::from_secs(2)));
         let received = AmqpTransport::open("broker:5672", Applies::Receive, &[text("queue", "in")])
             .expect("built");
         assert_eq!(received.queue, "in");
-        assert_eq!(received.login.virtual_host, "/");
+        assert_eq!(received.credentials.virtual_host, "/");
         let Err(refused) = AmqpTransport::open("broker:5672", Applies::Receive, &[]) else {
             panic!("a Receive Location's queue is required");
         };
@@ -348,13 +358,44 @@ mod tests {
             (first.exchange.as_str(), first.queue()),
             ("orders", "orders/order.placed".into())
         );
-        assert!(session.next_publish().expect("closed").is_none());
-        let mut session = far_end.accept_one(&listener).expect("second");
+        // The same broker, so the same connection: connected once.
         let second = session.next_publish().expect("second").expect("one");
         assert_eq!(second.body, long, "many frames, one body");
         assert_eq!(second.queue(), "other/key.two");
         assert!(session.next_publish().expect("closed").is_none());
         sender.join().expect("thread").expect("sending");
+    }
+
+    #[test]
+    fn a_thousand_publishes_connect_once_and_a_connection_the_broker_closed_is_replaced() {
+        const SENDS: usize = 1000;
+        let far_end = node().timing_out_after(Duration::from_secs(5));
+        let (listener, address) = far_end.bind().expect("binding");
+        let near = AmqpTransport::new(address, "orders", "order.placed", "q")
+            .timing_out_after(Duration::from_secs(5));
+        let sending = near.clone();
+        let sender = std::thread::spawn(move || {
+            let began = std::time::Instant::now();
+            for n in 0..SENDS {
+                sending.send("order.placed", n.to_string().as_bytes())?;
+            }
+            let took = began.elapsed();
+            // Generous for a debug build under load: a millisecond a publish.
+            assert!(took < Duration::from_millis(SENDS as u64), "{took:?}");
+            sending.send("order.placed", b"after the close")
+        });
+        // One login for every publish: one session accepted.
+        let mut session = far_end.accept_one(&listener).expect("accepting");
+        for n in 0..SENDS {
+            let publish = session.next_publish().expect("publish").expect("one");
+            assert_eq!(publish.body, n.to_string().as_bytes());
+        }
+        drop(session);
+        let mut again = far_end.accept_one(&listener).expect("a new connection");
+        let last = again.next_publish().expect("publish").expect("one");
+        assert_eq!(last.body, b"after the close");
+        sender.join().expect("thread").expect("sending");
+        assert_eq!(near.publishers.opened(), 2);
     }
 
     #[test]
@@ -444,7 +485,7 @@ mod tests {
         assert!(arrived.is_empty());
         let stranger = std::thread::spawn(move || {
             AmqpTransport::new(address, "e", "k", "q")
-                .logging_in(Login::new("guest", "wrong"))
+                .logging_in(Credentials::new("guest", "wrong"))
                 .timing_out_after(Duration::from_secs(2))
                 .connect()
                 .err()

@@ -26,7 +26,7 @@ use retry::Retry;
 use transport::latency::{TcpControl, spin, spread};
 use xcore::{JourneyId, PartyId};
 use xmip_core_transport_amqp::event_wire::{EventWire, Exchange, carried};
-use xmip_core_transport_amqp::{Login, Publish, Session};
+use xmip_core_transport_amqp::{Credentials, Publish, Session};
 
 /// The subscriber, a remote Party.
 const PARTY: PartyId = PartyId::new(22);
@@ -45,8 +45,8 @@ const TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What the Party is configured to be presented as, and what the far end
 /// admits.
-fn login() -> Login {
-    Login::new("xmip-events", "presented-for-party-22").on("/events")
+fn login() -> Credentials {
+    Credentials::new("xmip-events", "presented-for-party-22").on("/events")
 }
 
 /// A temporary audit directory of its own, never empty and never the

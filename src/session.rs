@@ -23,7 +23,7 @@ use std::time::Duration;
 use transport::error::{Result, classify, protocol_error};
 use transport::socket;
 
-use crate::client::Login;
+use crate::client::Credentials;
 use crate::confirm::{self, CONFIRM_SELECT};
 use crate::content::{self, Properties};
 use crate::method::{
@@ -102,7 +102,7 @@ impl Session {
     /// open with AMQP 0-9-1, or it was refused.
     pub fn accept(
         listener: &TcpListener,
-        expected: &Login,
+        expected: &Credentials,
         timeout: Option<Duration>,
     ) -> Result<Self> {
         let (stream, peer) = socket::accept_tcp(listener, timeout)?;
@@ -131,8 +131,9 @@ impl Session {
         session.say(0, &method::connection_start())?;
         let start_ok = session.expect(0, CONNECTION_START_OK, "connection.start-ok")?;
         let (user, password) = method::login_of(&start_ok)?;
-        if user != expected.user
-            || !codec::constant_time::equal(password.as_bytes(), expected.password.as_bytes())
+        let login = &expected.login;
+        if user != login.user
+            || !codec::constant_time::equal(password.as_bytes(), login.password.as_bytes())
         {
             return session.refuse(403, "ACCESS_REFUSED - login was refused");
         }
