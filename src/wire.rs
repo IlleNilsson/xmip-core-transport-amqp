@@ -16,6 +16,7 @@ use std::io::BufRead;
 
 use codec::cursor::Cursor;
 use codec::writer::ByteWriter;
+use transport::ceiling;
 use transport::error::{Result, classify, protocol_error};
 
 /// The octet every frame ends with.
@@ -115,11 +116,7 @@ pub fn read_frame(reader: &mut impl BufRead) -> Result<Option<Frame>> {
         .ok_or_else(|| protocol_error(format!("a frame type AMQP does not define: {octet}")))?;
     let channel = cursor.u16_be()?;
     let size = cursor.u32_be()? as usize;
-    if size > MAX_FRAME {
-        return Err(protocol_error(format!(
-            "a frame of {size} bytes, over the {MAX_FRAME} byte limit"
-        )));
-    }
+    ceiling::within(size, MAX_FRAME, "Xmip reads in one frame")?;
     let mut payload = vec![0u8; size + 1];
     reader
         .read_exact(&mut payload)

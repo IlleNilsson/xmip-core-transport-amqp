@@ -15,12 +15,11 @@ use std::io::BufRead;
 
 use codec::cursor::Cursor;
 use codec::writer::ByteWriter;
+use net::MAX_BODY;
+use transport::ceiling;
 use transport::error::{Result, protocol_error};
 
 use crate::wire::{Amqp, AmqpWrite, Frame, Kind, read_frame, table};
-
-/// The most a content header may announce before it is refused.
-pub const MAX_BODY: usize = 64 * 1024 * 1024;
 
 /// The class a content header names.
 const CLASS_BASIC: u16 = 60;
@@ -139,11 +138,7 @@ pub fn read(reader: &mut impl BufRead) -> Result<(Properties, Vec<u8>)> {
         Some(frame) if frame.kind == Kind::Header => header_of(&frame)?,
         _ => return Err(protocol_error("content without its header")),
     };
-    if size > MAX_BODY {
-        return Err(protocol_error(format!(
-            "a body of {size} bytes, over the {MAX_BODY} limit"
-        )));
-    }
+    ceiling::within(size, MAX_BODY, "Xmip reads in one body")?;
     let mut body = Vec::with_capacity(size);
     while body.len() < size {
         match read_frame(reader)? {
