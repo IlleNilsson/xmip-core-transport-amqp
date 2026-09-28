@@ -17,6 +17,10 @@ once the broker confirms it; until 2026-09-27 every send connected,
 published without a confirm and closed. What a Location presents is
 `Credentials`: the transport capability's `Login` and the virtual host.
 
+A Receive Location declares and consumes its queue once, on its first receive, and the consumer stays attached between receives; each receive takes and acknowledges what came until the broker is quiet for the timeout (`Client::consuming`, `Client::next_acked`, `transport::pool::delivered`). A consumer the broker closed is replaced. Until 2026-09-28 every receive connected, declared, consumed and closed.
+
+A send target is read by `net::Target` in [xmip-core-library-net](https://github.com/IlleNilsson/xmip-core-library-net), the one reading of a URI every technology calls. Until 2026-09-28 this technology stripped its scheme by hand.
+
 ## Properties, publisher confirms, and the event capability's wire events
 
 A content header carries three of the basic class's properties
