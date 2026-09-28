@@ -154,7 +154,7 @@ impl Client {
     ///
     /// # Errors
     /// Where the broker went away.
-    pub fn publish_with(
+    fn publish_with(
         &mut self,
         exchange: &str,
         routing_key: &str,
@@ -242,28 +242,29 @@ impl Client {
         method::tag_of(&ok)
     }
 
-    /// Declare `queue` durable, consume it, and take what is delivered,
-    /// each acknowledged, until it has been quiet for the timeout or the
-    /// broker closes. A quiet queue is an empty vector, not an error.
+    /// This client with `queue` declared durable and consumed: what a
+    /// Receive Location keeps between receives, and drains with
+    /// [`Client::next_acked`] and `transport::pool::delivered`.
     ///
     /// # Errors
-    /// Where the broker refused the queue or the consumer, or the
-    /// connection broke other than by going quiet.
-    pub fn drain(&mut self, queue: &str) -> Result<Vec<Delivery>> {
+    /// Where the broker refused the queue or the consumer, or went away.
+    pub fn consuming(mut self, queue: &str) -> Result<Self> {
         self.declare(queue)?;
         self.consume(queue)?;
-        let mut deliveries = Vec::new();
-        loop {
-            match self.next_delivery() {
-                Ok(Some(delivery)) => {
-                    self.ack(delivery.delivery_tag)?;
-                    deliveries.push(delivery);
-                }
-                Ok(None) => return Ok(deliveries),
-                Err(error) if error.retryable => return Ok(deliveries),
-                Err(error) => return Err(error),
-            }
-        }
+        Ok(self)
+    }
+
+    /// The next delivery, acknowledged, or `None` when the broker closed.
+    ///
+    /// # Errors
+    /// As [`Client::next_delivery`], or where the acknowledgement could not
+    /// be written.
+    pub fn next_acked(&mut self) -> Result<Option<Delivery>> {
+        let Some(delivery) = self.next_delivery()? else {
+            return Ok(None);
+        };
+        self.ack(delivery.delivery_tag)?;
+        Ok(Some(delivery))
     }
 
     /// The next delivery, or `None` when the broker closed.

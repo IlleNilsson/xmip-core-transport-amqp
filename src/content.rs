@@ -16,7 +16,7 @@ use std::io::BufRead;
 use codec::cursor::Cursor;
 use codec::writer::ByteWriter;
 use net::MAX_BODY;
-use transport::ceiling;
+use net::ceiling;
 use transport::error::{Result, protocol_error};
 
 use crate::wire::{Amqp, AmqpWrite, Frame, Kind, read_frame, table};
@@ -34,7 +34,7 @@ const TRANSIENT: u8 = 1;
 /// delivery-mode 2: the broker writes the message to disk.
 const PERSISTENT: u8 = 2;
 /// What a Stream is published as: bytes.
-pub const OCTETS: &str = "application/octet-stream";
+const OCTETS: &str = "application/octet-stream";
 
 /// The properties of one message that Xmip writes and reads.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

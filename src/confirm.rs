@@ -16,7 +16,7 @@ use crate::method::{BASIC_ACK, Id, Method};
 
 pub const CONFIRM_SELECT: Id = (85, 10);
 pub const CONFIRM_SELECT_OK: Id = (85, 11);
-pub const BASIC_NACK: Id = (60, 120);
+const BASIC_NACK: Id = (60, 120);
 
 /// confirm.select, waiting for its select-ok.
 #[must_use]

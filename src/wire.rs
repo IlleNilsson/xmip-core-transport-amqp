@@ -16,11 +16,11 @@ use std::io::BufRead;
 
 use codec::cursor::Cursor;
 use codec::writer::ByteWriter;
-use transport::ceiling;
+use net::ceiling;
 use transport::error::{Result, classify, protocol_error};
 
 /// The octet every frame ends with.
-pub const FRAME_END: u8 = 0xCE;
+const FRAME_END: u8 = 0xCE;
 
 /// The largest frame Xmip will read, and what it asks for in tune-ok.
 pub const MAX_FRAME: usize = 1024 * 1024;
@@ -104,12 +104,9 @@ impl Frame {
 /// A type octet AMQP does not define, a frame over [`MAX_FRAME`], a frame
 /// that does not end in `0xCE`, or a connection that broke.
 pub fn read_frame(reader: &mut impl BufRead) -> Result<Option<Frame>> {
-    let mut head = [0u8; 7];
-    match reader.read_exact(&mut head) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(error) => return Err(classify("reading a frame header", &error)),
-    }
+    let Some(head) = net::read::header::<7>(reader, "a frame header")? else {
+        return Ok(None);
+    };
     let mut cursor = Cursor::new(&head);
     let octet = cursor.byte()?;
     let kind = Kind::of(octet)
