@@ -6,8 +6,10 @@
 //! AMQP 0-9-1 is the enterprise broker's protocol — `RabbitMQ` and its kin,
 //! on port 5672: exchanges route by key to queues, consumers acknowledge. A
 //! Receive Location connects, declares its queue and consumes it,
-//! acknowledging each delivery once it is a Stream; a Send Location connects
-//! and publishes to an exchange under a routing key. Either may instead
+//! acknowledging each delivery after the runtime's receive cycle —
+//! `basic.ack` when accepted, `basic.reject` without requeue when refused,
+//! with requeue when the cycle failed ([`acknowledging`]); a Send Location
+//! connects and publishes to an exchange under a routing key. Either may instead
 //! accept clients directly through [`Session`], one client's worth of broker
 //! on one channel — the shape a producer that publishes straight to Xmip
 //! needs, and no more.
@@ -30,6 +32,7 @@
 //! headers field table, 0-9-1's equivalent of the 1.0 binding's
 //! application-properties — and reads one back off a delivery.
 
+pub mod acknowledging;
 pub mod client;
 pub mod confirm;
 pub mod content;
@@ -41,6 +44,7 @@ pub mod wire;
 use std::net::TcpListener;
 use std::time::Duration;
 
+pub use acknowledging::acknowledging;
 pub use client::{Client, Credentials, Delivery};
 use content::Properties;
 pub use method::Method;
@@ -51,7 +55,7 @@ use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::pool::delivered;
 use transport::socket;
-use transport::{Arrived, Configured, Directions, Pool, Transport};
+use transport::{Arrived, Configured, Directions, Pool, Taken, Transport};
 pub use wire::Frame;
 use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
 
@@ -158,15 +162,25 @@ impl Transport for AmqpTransport {
         Directions::BOTH
     }
 
-    /// Take what is delivered, each acknowledged, until the broker is quiet
-    /// for the timeout or closes, on the consumer the first receive
-    /// declared and kept: what the broker delivered between two receives
-    /// waits in the socket. A quiet queue is an empty vector, not an error.
+    fn arrivals(&self) -> transport::Arrivals {
+        transport::Arrivals::Ordered(
+            "the acknowledgement goes on the session the receive reads from",
+        )
+    }
+
+    /// Take what is delivered until the broker is quiet for the timeout or
+    /// closes, on the consumer the first receive declared and kept: what
+    /// the broker delivered between two receives waits in the socket. A
+    /// quiet queue is an empty vector, not an error. Nothing is
+    /// acknowledged here: each delivery's [`acknowledging`] answers it on
+    /// that consumer after the receive cycle — `basic.ack` when accepted,
+    /// `basic.reject` without requeue when refused, with requeue when the
+    /// cycle failed.
     fn receive(&self) -> Result<Vec<Arrived>> {
         let deliveries = self.consumers.exchange(
             self.broker.as_str(),
             || self.connect()?.consuming(&self.queue),
-            |client| delivered(client, Client::next_acked),
+            |client| delivered(client, Client::next_delivery),
         )?;
         Ok(deliveries
             .into_iter()
@@ -175,7 +189,9 @@ impl Transport for AmqpTransport {
                     "amqp://{}/{}/{}?delivery-tag={}",
                     self.broker, delivery.exchange, delivery.routing_key, delivery.delivery_tag
                 );
-                Arrived::new(origin, delivery.body)
+                let acknowledgement =
+                    acknowledging(&self.consumers, &self.broker, delivery.delivery_tag);
+                Arrived::whole(origin, delivery.body, acknowledgement)
             })
             .collect())
     }
@@ -272,7 +288,7 @@ impl AmqpTransport {
 }
 
 impl Accepting for AmqpTransport {
-    fn take_one(self, listener: &TcpListener) -> Result<Arrived> {
+    fn take_one(self, listener: &TcpListener) -> Result<Taken> {
         let mut session = self.accept_one(listener)?;
         // The confirm goes out as the publish is read; the client keeps its
         // connection for the next.
@@ -285,7 +301,7 @@ impl Accepting for AmqpTransport {
             publish.exchange,
             publish.routing_key
         );
-        Ok(Arrived::new(origin, publish.body))
+        Ok(Taken::new(origin, publish.body))
     }
 }
 
@@ -407,16 +423,27 @@ mod tests {
     }
 
     #[test]
-    fn a_session_delivers_to_a_consumer_and_is_acknowledged() {
+    fn a_delivery_is_acked_when_accepted_rejected_when_refused_and_requeued_when_failed() {
         // The far end outwaits the client: the client gives up on a quiet
-        // broker after two seconds and closes, and the close must find the
-        // session still listening.
+        // broker after two seconds, answers each delivery and closes, and
+        // the close must find the session still listening.
         let far_end = node().timing_out_after(Duration::from_secs(6));
         let (listener, address) = far_end.bind().expect("binding");
         let receiver = std::thread::spawn(move || {
-            AmqpTransport::new(address, "orders", "order.placed", "orders.in")
-                .timing_out_after(Duration::from_secs(2))
-                .receive()
+            let near = AmqpTransport::new(address, "orders", "order.placed", "orders.in")
+                .timing_out_after(Duration::from_secs(2));
+            let mut arrived = near.receive()?.into_iter();
+            let one = arrived.next().expect("one");
+            assert!(one.defers());
+            let one = one.taken()?;
+            arrived
+                .next()
+                .expect("two")
+                .refused(transport::Refusal::Unacceptable)?;
+            let three = arrived.next().expect("three");
+            let origin = three.origin_uri.clone();
+            three.failed()?;
+            Ok::<_, transport::TransportError>((one, origin))
         });
         let mut session = far_end.accept_one(&listener).expect("accepting");
         assert_eq!(
@@ -429,19 +456,42 @@ mod tests {
         );
         session.deliver("orders.in", b"one").expect("one");
         session.deliver("orders.in", b"two").expect("two");
-        // Two acknowledgements, then the client's close.
+        session.deliver("orders.in", b"three").expect("three");
+        // Nothing answered until the cycle: then the ack, the reject the
+        // broker does not deliver again, the reject with requeue, and the
+        // client's close.
         assert_eq!(session.next_event().expect("ack"), Some(Event::Acked(1)));
-        assert_eq!(session.next_event().expect("ack"), Some(Event::Acked(2)));
+        assert_eq!(
+            session.next_event().expect("refused"),
+            Some(Event::Rejected {
+                delivery_tag: 2,
+                requeue: false
+            })
+        );
+        assert_eq!(
+            session.next_event().expect("failed"),
+            Some(Event::Rejected {
+                delivery_tag: 3,
+                requeue: true
+            })
+        );
         assert!(session.next_event().expect("close").is_none());
-        let arrived = receiver.join().expect("thread").expect("receiving");
-        assert_eq!(arrived.len(), 2);
-        assert_eq!(arrived[0].bytes, b"one");
+        let (one, origin) = receiver.join().expect("thread").expect("receiving");
+        assert_eq!(one.bytes, b"one");
         assert!(
-            arrived[1]
-                .origin_uri
-                .ends_with("//orders.in?delivery-tag=2"),
+            origin.ends_with("//orders.in?delivery-tag=3"),
             "the default exchange, the queue as the key"
         );
+    }
+
+    #[test]
+    fn a_verdict_on_a_consumer_the_broker_closed_opens_no_other() {
+        let consumers = Pool::<Client>::new();
+        let error = acknowledging(&consumers, "127.0.0.1:1", 1)
+            .acknowledge(transport::Verdict::Accepted)
+            .expect_err("no consumer kept");
+        assert!(error.message.contains("delivers it again"), "{error}");
+        assert_eq!(consumers.opened(), 0);
     }
 
     #[test]
@@ -459,7 +509,9 @@ mod tests {
                 if !now.is_empty() {
                     taken.send(()).expect("told");
                 }
-                arrived.extend(now.into_iter().map(|one| one.bytes));
+                for one in now {
+                    arrived.push(one.taken()?.bytes);
+                }
             }
             Ok::<_, transport::TransportError>(arrived)
         });

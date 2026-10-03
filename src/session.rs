@@ -27,9 +27,9 @@ use crate::client::Credentials;
 use crate::confirm::{self, CONFIRM_SELECT};
 use crate::content::{self, Properties};
 use crate::method::{
-    self, BASIC_ACK, BASIC_CONSUME, BASIC_PUBLISH, CHANNEL_CLOSE, CHANNEL_CLOSE_OK, CHANNEL_OPEN,
-    CONNECTION_CLOSE, CONNECTION_CLOSE_OK, CONNECTION_OPEN, CONNECTION_START_OK, CONNECTION_TUNE,
-    CONNECTION_TUNE_OK, Id, Method, QUEUE_DECLARE,
+    self, BASIC_ACK, BASIC_CONSUME, BASIC_PUBLISH, BASIC_REJECT, CHANNEL_CLOSE, CHANNEL_CLOSE_OK,
+    CHANNEL_OPEN, CONNECTION_CLOSE, CONNECTION_CLOSE_OK, CONNECTION_OPEN, CONNECTION_START_OK,
+    CONNECTION_TUNE, CONNECTION_TUNE_OK, Id, Method, QUEUE_DECLARE,
 };
 use crate::wire::{Frame, Kind, MAX_FRAME, PROTOCOL_HEADER, len32, read_frame};
 
@@ -66,6 +66,8 @@ pub enum Event {
     Consuming(String),
     /// The client acknowledged this delivery tag.
     Acked(u64),
+    /// The client rejected this delivery tag, and asked it requeued or not.
+    Rejected { delivery_tag: u64, requeue: bool },
 }
 
 /// What the session holds: messages per queue, not yet delivered.
@@ -293,6 +295,13 @@ impl Session {
                     Event::Published(publish)
                 }
                 BASIC_ACK => Event::Acked(method::delivery_tag_of(&method)?),
+                BASIC_REJECT => {
+                    let (delivery_tag, requeue) = method::reject_of(&method)?;
+                    Event::Rejected {
+                        delivery_tag,
+                        requeue,
+                    }
+                }
                 CONNECTION_CLOSE => {
                     self.say(0, &Method::bare(CONNECTION_CLOSE_OK))?;
                     return Ok(None);

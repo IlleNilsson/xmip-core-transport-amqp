@@ -231,8 +231,9 @@ impl Client {
         }
     }
 
-    /// Consume `queue`, each delivery acknowledged by [`Client::ack`]; the
-    /// consumer tag the broker confirmed.
+    /// Consume `queue`, each delivery acknowledged by [`Client::ack`] or
+    /// rejected by [`Client::reject`], never on its own; the consumer tag
+    /// the broker confirmed.
     ///
     /// # Errors
     /// Where the broker refused the consumer or went away.
@@ -244,7 +245,7 @@ impl Client {
 
     /// This client with `queue` declared durable and consumed: what a
     /// Receive Location keeps between receives, and drains with
-    /// [`Client::next_acked`] and `transport::pool::delivered`.
+    /// [`Client::next_delivery`] and `transport::pool::delivered`.
     ///
     /// # Errors
     /// Where the broker refused the queue or the consumer, or went away.
@@ -252,19 +253,6 @@ impl Client {
         self.declare(queue)?;
         self.consume(queue)?;
         Ok(self)
-    }
-
-    /// The next delivery, acknowledged, or `None` when the broker closed.
-    ///
-    /// # Errors
-    /// As [`Client::next_delivery`], or where the acknowledgement could not
-    /// be written.
-    pub fn next_acked(&mut self) -> Result<Option<Delivery>> {
-        let Some(delivery) = self.next_delivery()? else {
-            return Ok(None);
-        };
-        self.ack(delivery.delivery_tag)?;
-        Ok(Some(delivery))
     }
 
     /// The next delivery, or `None` when the broker closed.
@@ -303,6 +291,15 @@ impl Client {
     /// Where the broker went away.
     pub fn ack(&mut self, delivery_tag: u64) -> Result<()> {
         self.say(1, &method::basic_ack(delivery_tag))
+    }
+
+    /// basic.reject the delivery under `delivery_tag`, back onto its queue
+    /// for redelivery where `requeue` is set.
+    ///
+    /// # Errors
+    /// Where the broker went away.
+    pub fn reject(&mut self, delivery_tag: u64, requeue: bool) -> Result<()> {
+        self.say(1, &method::basic_reject(delivery_tag, requeue))
     }
 
     /// Close the channel and the connection, each answered; nothing to do
