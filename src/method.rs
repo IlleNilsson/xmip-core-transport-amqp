@@ -4,7 +4,7 @@
 //!
 //! Connection start, start-ok, tune, tune-ok, open, open-ok, close and
 //! close-ok; channel open, open-ok, close and close-ok; queue declare and
-//! declare-ok; basic consume, consume-ok, publish, deliver and ack. That is
+//! declare-ok; basic consume, consume-ok, publish, deliver, ack and reject. That is
 //! the whole of what a Location that declares, publishes, consumes and
 //! acknowledges says and hears. Publisher confirms are `confirm.rs`'s;
 //! exchanges, bindings and transactions are not here.
@@ -40,6 +40,7 @@ pub const BASIC_CONSUME_OK: Id = (60, 21);
 pub const BASIC_PUBLISH: Id = (60, 40);
 pub const BASIC_DELIVER: Id = (60, 60);
 pub const BASIC_ACK: Id = (60, 80);
+pub const BASIC_REJECT: Id = (60, 90);
 
 /// queue.declare's bits — passive, durable, exclusive, auto-delete,
 /// no-wait — with durable set.
@@ -360,6 +361,25 @@ pub fn basic_ack(delivery_tag: u64) -> Method {
     Method::new(BASIC_ACK, out)
 }
 
+/// basic.reject of `delivery_tag`, back onto its queue for redelivery
+/// where `requeue` is set.
+#[must_use]
+pub fn basic_reject(delivery_tag: u64, requeue: bool) -> Method {
+    let mut out = Vec::new();
+    out.u64_be(delivery_tag).byte(u8::from(requeue));
+    Method::new(BASIC_REJECT, out)
+}
+
+/// The delivery tag a reject names, and whether it is requeued.
+///
+/// # Errors
+/// Arguments that end early.
+pub fn reject_of(method: &Method) -> Result<(u64, bool)> {
+    let mut cursor = method.cursor();
+    let delivery_tag = cursor.u64_be()?;
+    Ok((delivery_tag, cursor.byte()? & 1 == 1))
+}
+
 /// The delivery tag an ack names.
 ///
 /// # Errors
@@ -455,6 +475,13 @@ mod tests {
             (9, String::new(), "orders".to_string())
         );
         assert_eq!(delivery_tag_of(&back(&basic_ack(9))).expect("ack"), 9);
+        let reject = back(&basic_reject(9, true));
+        assert!(reject.is(BASIC_REJECT));
+        assert_eq!(reject_of(&reject).expect("reject"), (9, true));
+        assert_eq!(
+            reject_of(&basic_reject(4, false)).expect("reject"),
+            (4, false)
+        );
         let body = Frame::new(Kind::Body, 1, vec![1]);
         assert!(Method::of(&body).is_err(), "not a method");
         let short = Frame::new(Kind::Method, 1, vec![0]);
