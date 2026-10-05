@@ -25,9 +25,9 @@ A send target is read by `net::Target` in [xmip-core-library-net](https://github
 
 ## Properties, publisher confirms, and the event capability's wire events
 
-A content header carries three of the basic class's properties
-(`content::Properties`): content-type, the headers field table and
-delivery-mode, written by a publish and read off a publish or a delivery
+A content header carries four of the basic class's properties
+(`content::Properties`): content-type, the headers field table,
+delivery-mode and, since 2026-10-04, message-id, written by a publish and read off a publish or a delivery
 (`Publish::properties`, `Delivery::properties`). Until 2026-09-26 a header
 said only `application/octet-stream` and nothing a header said was read. A
 publish goes out as one write — method, header and body frames together —
@@ -56,6 +56,10 @@ replaced and the event published again. `event_wire::carried` is the read side: 
 delivery's properties and body, as the binding reads a `WireEvent` from.
 `tests/event_wire.rs` holds publish to far-end receipt to a millisecond at
 the median and five at the 99th percentile, apart from load.
+
+## The deduplication key
+
+A keyed send (`Transport::send_keyed`, built 2026-10-04) carries the Journey's identifier as the message-id basic property (`content::Properties::message_id`, flag bit 7, after delivery-mode), the same on every attempt of one Journey. An AMQP 0-9-1 broker does not drop a repeated publish by it; a consumer, or a broker's deduplication plugin, recognises the repeat by its message-id. An unkeyed `send` sets none. A delivery's message-id is read back, the four properties between delivery-mode and it skipped.
 
 ## Toolchain
 
