@@ -200,12 +200,26 @@ impl Transport for AmqpTransport {
     /// first send to it, and return once the broker confirms it took the
     /// message: the confirm, not a close, is what says it arrived.
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
-        let (broker, exchange, key) = self.resolve(target);
-        let properties = Properties::octets(false);
+        self.publish(target, bytes, None)
+    }
+
+    /// The key goes in the message-id property, which a consumer, or a
+    /// broker's deduplication plugin, recognises a repeated publish by.
+    fn send_keyed(&self, target: &str, bytes: &[u8], key: &str) -> Result<()> {
+        self.publish(target, bytes, Some(key))
+    }
+}
+
+impl AmqpTransport {
+    /// The one send: `bytes` published to `target` and confirmed, under
+    /// `key` as its message-id where there is one.
+    fn publish(&self, target: &str, bytes: &[u8], key: Option<&str>) -> Result<()> {
+        let (broker, exchange, routing_key) = self.resolve(target);
+        let properties = Properties::octets(false).keyed(key);
         self.publishers.exchange(
             broker,
             || Client::connect(broker, &self.credentials, self.timeout),
-            |client| client.publish_confirmed(exchange, key, &properties, bytes),
+            |client| client.publish_confirmed(exchange, routing_key, &properties, bytes),
         )
     }
 }

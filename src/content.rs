@@ -3,9 +3,10 @@
 //! it announces, each within the frame size the connection settled on.
 //!
 //! Only the basic class carries content here, and of the fourteen
-//! properties a header may carry Xmip writes and reads three:
-//! content-type, the headers field table and delivery-mode
-//! ([`Properties`]). The rest are skipped when read and never written. The
+//! properties a header may carry Xmip writes and reads four:
+//! content-type, the headers field table, delivery-mode and message-id
+//! ([`Properties`]). The rest are skipped when read and never written.
+//! message-id carries a keyed send's deduplication key, since 2026-10-04. The
 //! headers table is where the event capability's wire event attributes
 //! travel (`event_wire.rs`); until 2026-09-26 a header said only
 //! `application/octet-stream` and delivery-mode, and nothing of what a
@@ -29,6 +30,13 @@ const HAS_CONTENT_TYPE: u16 = 1 << 15;
 const HAS_CONTENT_ENCODING: u16 = 1 << 14;
 const HAS_HEADERS: u16 = 1 << 13;
 const HAS_DELIVERY_MODE: u16 = 1 << 12;
+/// priority 11, correlation-id 10, reply-to 9, expiration 8: skipped when
+/// read, to reach message-id, bit 7.
+const HAS_PRIORITY: u16 = 1 << 11;
+const HAS_CORRELATION_ID: u16 = 1 << 10;
+const HAS_REPLY_TO: u16 = 1 << 9;
+const HAS_EXPIRATION: u16 = 1 << 8;
+const HAS_MESSAGE_ID: u16 = 1 << 7;
 /// delivery-mode 1: the broker may keep the message in memory only.
 const TRANSIENT: u8 = 1;
 /// delivery-mode 2: the broker writes the message to disk.
@@ -45,6 +53,10 @@ pub struct Properties {
     pub headers: Vec<(String, String)>,
     /// delivery-mode 2 rather than 1.
     pub persistent: bool,
+    /// The message-id: a keyed send's deduplication key, the Journey's
+    /// identifier, which a consumer or a deduplicating broker plugin
+    /// recognises a repeated publish by.
+    pub message_id: Option<String>,
 }
 
 impl Properties {
@@ -55,6 +67,16 @@ impl Properties {
             content_type: Some(OCTETS.to_string()),
             headers: Vec::new(),
             persistent,
+            message_id: None,
+        }
+    }
+
+    /// These properties, with `key` as the message-id where there is one.
+    #[must_use]
+    pub fn keyed(self, key: Option<&str>) -> Self {
+        Self {
+            message_id: key.map(str::to_string),
+            ..self
         }
     }
 
@@ -67,6 +89,9 @@ impl Properties {
         }
         if !self.headers.is_empty() {
             flags |= HAS_HEADERS;
+        }
+        if self.message_id.is_some() {
+            flags |= HAS_MESSAGE_ID;
         }
         out.u16_be(flags);
         if let Some(content_type) = &self.content_type {
@@ -85,6 +110,9 @@ impl Properties {
         } else {
             TRANSIENT
         });
+        if let Some(message_id) = &self.message_id {
+            out.short_string(message_id);
+        }
     }
 
     /// The properties a content header carries after its body size.
@@ -102,6 +130,17 @@ impl Properties {
         }
         if flags & HAS_DELIVERY_MODE != 0 {
             properties.persistent = cursor.byte()? == PERSISTENT;
+        }
+        if flags & HAS_PRIORITY != 0 {
+            cursor.byte()?;
+        }
+        for skipped in [HAS_CORRELATION_ID, HAS_REPLY_TO, HAS_EXPIRATION] {
+            if flags & skipped != 0 {
+                cursor.short_string()?;
+            }
+        }
+        if flags & HAS_MESSAGE_ID != 0 {
+            properties.message_id = Some(cursor.short_string()?);
         }
         Ok(properties)
     }
@@ -203,6 +242,7 @@ mod tests {
                 ),
             ],
             persistent: true,
+            message_id: Some("0b6f5a52-7c1e-4d0a-9a4e-3f1d2c8b9e70".to_string()),
         };
         let frames = frames(1, &properties, b"{}", 4096);
         let (taken, body) = read(&mut wire(&frames).as_slice()).expect("content");
