@@ -146,6 +146,7 @@ pub fn properties(carried: &Carried) -> Properties {
         headers: carried.headers.clone(),
         persistent: true,
         message_id: None,
+        user_id: None,
     }
 }
 

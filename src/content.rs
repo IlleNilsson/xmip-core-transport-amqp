@@ -37,6 +37,11 @@ const HAS_CORRELATION_ID: u16 = 1 << 10;
 const HAS_REPLY_TO: u16 = 1 << 9;
 const HAS_EXPIRATION: u16 = 1 << 8;
 const HAS_MESSAGE_ID: u16 = 1 << 7;
+/// timestamp 6 and type 5: skipped when read, to reach user-id, bit 4, which
+/// the broker validates against the connection's login.
+const HAS_TIMESTAMP: u16 = 1 << 6;
+const HAS_TYPE: u16 = 1 << 5;
+const HAS_USER_ID: u16 = 1 << 4;
 /// delivery-mode 1: the broker may keep the message in memory only.
 const TRANSIENT: u8 = 1;
 /// delivery-mode 2: the broker writes the message to disk.
@@ -57,6 +62,9 @@ pub struct Properties {
     /// identifier, which a consumer or a deduplicating broker plugin
     /// recognises a repeated publish by.
     pub message_id: Option<String>,
+    /// The user-id: who published it, as the broker validated it against the
+    /// publisher's login. Read, never written: Xmip does not claim one.
+    pub user_id: Option<String>,
 }
 
 impl Properties {
@@ -68,6 +76,7 @@ impl Properties {
             headers: Vec::new(),
             persistent,
             message_id: None,
+            user_id: None,
         }
     }
 
@@ -141,6 +150,15 @@ impl Properties {
         }
         if flags & HAS_MESSAGE_ID != 0 {
             properties.message_id = Some(cursor.short_string()?);
+        }
+        if flags & HAS_TIMESTAMP != 0 {
+            cursor.u64_be()?;
+        }
+        if flags & HAS_TYPE != 0 {
+            cursor.short_string()?;
+        }
+        if flags & HAS_USER_ID != 0 {
+            properties.user_id = Some(cursor.short_string()?);
         }
         Ok(properties)
     }
@@ -243,6 +261,7 @@ mod tests {
             ],
             persistent: true,
             message_id: Some("0b6f5a52-7c1e-4d0a-9a4e-3f1d2c8b9e70".to_string()),
+            user_id: None,
         };
         let frames = frames(1, &properties, b"{}", 4096);
         let (taken, body) = read(&mut wire(&frames).as_slice()).expect("content");
@@ -277,5 +296,18 @@ mod tests {
             read(&mut bytes.as_slice()).is_err(),
             "headers announced, not there"
         );
+    }
+
+    #[test]
+    fn a_delivery_says_who_published_it_in_its_user_id() {
+        // AMQP 0-9-1, basic properties: timestamp and type are passed over
+        // to reach the user-id the broker validated.
+        let mut header = Vec::new();
+        header.u16_be(HAS_TIMESTAMP | HAS_TYPE | HAS_USER_ID);
+        header.u64_be(1_700_000_000);
+        header.short_string("order");
+        header.short_string("c1");
+        let properties = Properties::read(&mut Cursor::new(&header)).expect("read");
+        assert_eq!(properties.user_id.as_deref(), Some("c1"));
     }
 }
