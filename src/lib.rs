@@ -170,6 +170,10 @@ impl Transport for AmqpTransport {
         )
     }
 
+    fn waiting(&self) -> transport::Waiting {
+        transport::Waiting::Waits("the broker is drained until quiet for the timeout")
+    }
+
     /// Take what is delivered until the broker is quiet for the timeout or
     /// closes, on the consumer the first receive declared and kept: what
     /// the broker delivered between two receives waits in the socket. A
