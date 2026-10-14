@@ -339,7 +339,7 @@ mod tests {
         assert_eq!(pairs[3], ("nothing".into(), String::new()));
         let mut unknown = Vec::new();
         unknown.short_string("x").byte(b'?');
-        assert!(table(&unknown).expect("stops").is_empty());
+        assert_eq!(table(&unknown).expect("stops"), [] as [(String, String); 0]);
         let mut written = Vec::new();
         written.string_table(&[("product", "xmip")]);
         let written = Cursor::new(&written).long_string().expect("table");

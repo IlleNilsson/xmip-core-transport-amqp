@@ -245,7 +245,7 @@ mod tests {
         assert_eq!(empty.len(), 1, "an empty body is a header alone");
         assert_eq!(*empty[0].payload.last().expect("mode"), TRANSIENT);
         let (_, body) = read(&mut empty[0].encode().as_slice()).expect("empty");
-        assert!(body.is_empty());
+        assert_eq!(body, [] as [u8; 0]);
     }
 
     #[test]
