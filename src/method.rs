@@ -433,10 +433,9 @@ mod tests {
             close_of(&close).expect("close"),
             (403, "ACCESS_REFUSED".to_string())
         );
-        assert!(
-            back(&Method::bare(CONNECTION_CLOSE_OK))
-                .arguments
-                .is_empty()
+        assert_eq!(
+            back(&Method::bare(CONNECTION_CLOSE_OK)).arguments,
+            [] as [u8; 0]
         );
         assert!(back(&channel_open()).is(CHANNEL_OPEN));
         assert!(back(&channel_open_ok()).is(CHANNEL_OPEN_OK));
