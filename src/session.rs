@@ -16,22 +16,20 @@
 //! that could not take a message, and the publisher's retry.
 
 use std::collections::BTreeMap;
-use std::io::{BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::time::Duration;
+use std::io::{BufReader, Write};
+use std::net::{SocketAddr, TcpStream};
 
 use transport::error::{Result, classify, protocol_error};
-use transport::socket;
 
-use crate::client::Credentials;
 use crate::confirm::{self, CONFIRM_SELECT};
 use crate::content::{self, Properties};
 use crate::method::{
     self, BASIC_ACK, BASIC_CONSUME, BASIC_PUBLISH, BASIC_REJECT, CHANNEL_CLOSE, CHANNEL_CLOSE_OK,
-    CHANNEL_OPEN, CONNECTION_CLOSE, CONNECTION_CLOSE_OK, CONNECTION_OPEN, CONNECTION_START_OK,
-    CONNECTION_TUNE, CONNECTION_TUNE_OK, Id, Method, QUEUE_DECLARE,
+    CHANNEL_OPEN, CONNECTION_CLOSE, CONNECTION_CLOSE_OK, Method, QUEUE_DECLARE,
 };
-use crate::wire::{Frame, Kind, MAX_FRAME, PROTOCOL_HEADER, len32, read_frame};
+use crate::wire::{Frame, Kind, MAX_FRAME, len32, read_frame};
+
+mod opening;
 
 /// One basic.publish as the client sent it, its properties and its body.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,70 +93,6 @@ pub struct Session {
 }
 
 impl Session {
-    /// Accept one client on `listener` and complete its handshake, closing
-    /// with 403 where its login is not `expected` and 530 where its
-    /// virtual host is not.
-    ///
-    /// # Errors
-    /// Where the connection could not be accepted, the client did not
-    /// open with AMQP 0-9-1, or it was refused.
-    pub fn accept(
-        listener: &TcpListener,
-        expected: &Credentials,
-        timeout: Option<Duration>,
-    ) -> Result<Self> {
-        let (stream, peer) = socket::accept_tcp(listener, timeout)?;
-        let (reader, writer) = socket::split(stream)?;
-        let mut session = Self {
-            reader,
-            writer,
-            peer,
-            user: String::new(),
-            virtual_host: String::new(),
-            queues: Queues::new(),
-            consumer: None,
-            delivery_tag: 0,
-            confirming: None,
-            nacking: 0,
-        };
-        let mut header = [0u8; 8];
-        session
-            .reader
-            .read_exact(&mut header)
-            .map_err(|e| classify("reading the protocol header", &e))?;
-        if header != PROTOCOL_HEADER {
-            session.write(PROTOCOL_HEADER)?;
-            return Err(protocol_error("the client did not open with AMQP 0-9-1"));
-        }
-        session.say(0, &method::connection_start())?;
-        let start_ok = session.expect(0, CONNECTION_START_OK, "connection.start-ok")?;
-        let (user, password) = method::login_of(&start_ok)?;
-        let login = &expected.login;
-        if user != login.user
-            || !codec::constant_time::equal(password.as_bytes(), login.password.as_bytes())
-        {
-            return session.refuse(403, "ACCESS_REFUSED - login was refused");
-        }
-        session.user = user;
-        session.say(0, &method::tune(CONNECTION_TUNE, 1, len32(MAX_FRAME)))?;
-        session.expect(0, CONNECTION_TUNE_OK, "connection.tune-ok")?;
-        let open = session.expect(0, CONNECTION_OPEN, "connection.open")?;
-        session.virtual_host = method::virtual_host_of(&open)?;
-        if session.virtual_host != expected.virtual_host {
-            return session.refuse(530, "NOT_ALLOWED - access to the virtual host was refused");
-        }
-        session.say(0, &method::connection_open_ok())?;
-        Ok(session)
-    }
-
-    /// connection.close with `code`, and the refusal it is.
-    fn refuse(mut self, code: u16, text: &str) -> Result<Self> {
-        self.say(0, &method::close(CONNECTION_CLOSE, code, text))?;
-        Err(protocol_error(format!(
-            "the client was refused: {code} {text}"
-        )))
-    }
-
     /// Answer the next `times` confirmed publishes `basic.nack`, keeping
     /// nothing of them.
     #[must_use]
@@ -308,7 +242,7 @@ impl Session {
                 }
                 _ => {
                     let label = method.label();
-                    self.say(0, &method::close(CONNECTION_CLOSE, 540, "NOT_IMPLEMENTED"))?;
+                    self.close(540, "NOT_IMPLEMENTED")?;
                     return Err(protocol_error(format!("method {label} is not served here")));
                 }
             };
@@ -359,27 +293,6 @@ impl Session {
             self.write(&frame.encode())?;
         }
         Ok(())
-    }
-
-    /// The next method, which must be `id` on `channel`.
-    fn expect(&mut self, channel: u16, id: Id, what: &str) -> Result<Method> {
-        match read_frame(&mut self.reader)? {
-            Some(frame) if frame.kind == Kind::Method && frame.channel == channel => {
-                let method = Method::of(&frame)?;
-                if method.is(id) {
-                    return Ok(method);
-                }
-                Err(protocol_error(format!(
-                    "method {} where {what} was expected",
-                    method.label()
-                )))
-            }
-            Some(frame) => Err(protocol_error(format!(
-                "a {:?} frame on channel {} where {what} was expected",
-                frame.kind, frame.channel
-            ))),
-            None => Err(protocol_error(format!("the client closed before {what}"))),
-        }
     }
 
     fn say(&mut self, channel: u16, method: &Method) -> Result<()> {

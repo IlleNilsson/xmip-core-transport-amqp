@@ -632,6 +632,35 @@ mod tests {
     }
 
     #[test]
+    fn a_wrong_login_is_refused_over_what_the_client_sent_after() {
+        // The connection.close is written with megabytes the client sent
+        // after its start-ok unread, which a bare drop resets away on
+        // Windows.
+        let far_end = node();
+        let (listener, address) = far_end.bind().expect("binding");
+        let serving = std::thread::spawn(move || far_end.accept_one(&listener).err());
+        let mut head = wire::PROTOCOL_HEADER.to_vec();
+        head.extend(
+            method::connection_start_ok("guest", "wrong")
+                .frame(0)
+                .encode(),
+        );
+        let answer = transport::unread::answered_over_unread(&address, &head, 0xCE, |stream| {
+            let mut reader = std::io::BufReader::new(stream);
+            wire::read_frame(&mut reader)
+                .and_then(|_start| wire::read_frame(&mut reader))
+                .and_then(|close| {
+                    let close = close.ok_or_else(|| protocol_error("closed unanswered"))?;
+                    method::close_of(&method::Method::of(&close)?)
+                })
+        });
+        let (code, _) = answer.expect("the connection.close");
+        assert_eq!(code, 403);
+        let refused = serving.join().expect("the far end").expect("refused");
+        assert!(refused.message.contains("403"), "{refused}");
+    }
+
+    #[test]
     fn a_peer_that_does_not_speak_amqp_is_refused() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let address = listener.local_addr().expect("address").to_string();
