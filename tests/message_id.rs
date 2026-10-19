@@ -17,8 +17,8 @@ fn a_keyed_publish_carries_the_journey_id_as_its_message_id_on_every_attempt() {
     let sender = thread::spawn(move || {
         let near = AmqpTransport::loopback();
         let target = format!("amqp://{address}/probe/probe");
-        near.send_keyed(&target, b"order", KEY)?;
-        near.send_keyed(&target, b"order", KEY)?;
+        near.send_from(&target, transport::Outgoing::held(b"order").keyed(KEY))?;
+        near.send_from(&target, transport::Outgoing::held(b"order").keyed(KEY))?;
         near.send(&target, b"order")
     });
     let mut session = far_end.accept_one(&listener).expect("accepted");
