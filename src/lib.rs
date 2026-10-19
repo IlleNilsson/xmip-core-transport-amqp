@@ -182,11 +182,11 @@ impl Transport for AmqpTransport {
     /// that consumer after the receive cycle — `basic.ack` when accepted,
     /// `basic.reject` without requeue when refused, with requeue when the
     /// cycle failed.
-    fn receive(&self) -> Result<Vec<Arrived>> {
+    fn receive_up_to(&self, most: usize) -> Result<Vec<Arrived>> {
         let deliveries = self.consumers.exchange(
             self.broker.as_str(),
             || self.connect()?.consuming(&self.queue),
-            |client| delivered(client, Client::next_delivery),
+            |client| delivered(client, most, Client::next_delivery),
         )?;
         Ok(deliveries
             .into_iter()
@@ -209,17 +209,18 @@ impl Transport for AmqpTransport {
             .collect())
     }
 
+    fn sending(&self) -> transport::Sending {
+        transport::Sending::Gathered("a publish is one message the broker confirms whole")
+    }
+
     /// Publish on the connection kept for the broker, connected on the
     /// first send to it, and return once the broker confirms it took the
     /// message: the confirm, not a close, is what says it arrived.
-    fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
-        self.publish(target, bytes, None)
-    }
-
     /// The key goes in the message-id property, which a consumer, or a
     /// broker's deduplication plugin, recognises a repeated publish by.
-    fn send_keyed(&self, target: &str, bytes: &[u8], key: &str) -> Result<()> {
-        self.publish(target, bytes, Some(key))
+    fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
+        let bytes: &[u8] = &outgoing.gather()?;
+        self.publish(target, bytes, outgoing.key())
     }
 }
 
