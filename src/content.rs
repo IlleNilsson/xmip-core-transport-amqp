@@ -60,7 +60,7 @@ pub struct Properties {
     pub persistent: bool,
     /// The message-id: a keyed send's deduplication key, the Journey's
     /// identifier, which a consumer or a deduplicating broker plugin
-    /// recognises a repeated publish by.
+    /// recognizes a repeated publish by.
     pub message_id: Option<String>,
     /// The user-id: who published it, as the broker validated it against the
     /// publisher's login. Read, never written: Xmip does not claim one.

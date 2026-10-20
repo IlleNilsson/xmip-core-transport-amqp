@@ -59,7 +59,7 @@ the median and five at the 99th percentile, apart from load.
 
 ## The deduplication key
 
-A keyed send (the key `Transport::send_from` is handed, `Outgoing::key`; built 2026-10-04) carries the Journey's identifier as the message-id basic property (`content::Properties::message_id`, flag bit 7, after delivery-mode), the same on every attempt of one Journey. An AMQP 0-9-1 broker does not drop a repeated publish by it; a consumer, or a broker's deduplication plugin, recognises the repeat by its message-id. An unkeyed `send` sets none. A delivery's message-id is read back, the four properties between delivery-mode and it skipped.
+A keyed send (the key `Transport::send_from` is handed, `Outgoing::key`; built 2026-10-04) carries the Journey's identifier as the message-id basic property (`content::Properties::message_id`, flag bit 7, after delivery-mode), the same on every attempt of one Journey. An AMQP 0-9-1 broker does not drop a repeated publish by it; a consumer, or a broker's deduplication plugin, recognizes the repeat by its message-id. An unkeyed `send` sets none. A delivery's message-id is read back, the four properties between delivery-mode and it skipped.
 
 ## Toolchain
 
