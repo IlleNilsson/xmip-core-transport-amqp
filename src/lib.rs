@@ -217,7 +217,7 @@ impl Transport for AmqpTransport {
     /// first send to it, and return once the broker confirms it took the
     /// message: the confirm, not a close, is what says it arrived.
     /// The key goes in the message-id property, which a consumer, or a
-    /// broker's deduplication plugin, recognises a repeated publish by.
+    /// broker's deduplication plugin, recognizes a repeated publish by.
     fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
         let bytes: &[u8] = &outgoing.gather()?;
         self.publish(target, bytes, outgoing.key())
