@@ -139,7 +139,7 @@ impl AmqpTransport {
     /// `amqp://host:5672/exchange/routing.key` — or is a routing key alone
     /// on this transport's broker and exchange.
     fn resolve<'a>(&'a self, target: &'a str) -> (&'a str, &'a str, &'a str) {
-        let Some(named) = Target::under(&["amqp"], target) else {
+        let Some(named) = Target::under(Self::SCHEMES, target) else {
             return (&self.broker, &self.exchange, target);
         };
         let (exchange, key) = named.path().split_once('/').unwrap_or(("", named.path()));
@@ -284,6 +284,9 @@ impl Configured for AmqpTransport {
             },
         ],
     };
+
+    /// The schemes a Location's address is entered with to choose this technology.
+    const SCHEMES: &'static [&'static str] = &["amqp"];
 
     fn configured(address: &str, settings: &xcore::settings::Read) -> Result<Self> {
         let text = |name| settings.optional_text(name).unwrap_or_default();
