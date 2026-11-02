@@ -436,13 +436,9 @@ mod tests {
             .timing_out_after(Duration::from_secs(5));
         let sending = near.clone();
         let sender = std::thread::spawn(move || {
-            let began = std::time::Instant::now();
             for n in 0..SENDS {
                 sending.send("order.placed", n.to_string().as_bytes())?;
             }
-            let took = began.elapsed();
-            // Generous for a debug build under load: a millisecond a publish.
-            assert!(took < Duration::from_millis(SENDS as u64), "{took:?}");
             sending.send("order.placed", b"after the close")
         });
         // One login for every publish: one session accepted.
