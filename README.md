@@ -54,8 +54,9 @@ capability's `Login` and the virtual host. The connections to each Party
 are the capability's `Pool`, kept between events; one that fails is
 replaced and the event published again. `event_wire::carried` is the read side: a
 delivery's properties and body, as the binding reads a `WireEvent` from.
-`tests/event_wire.rs` holds publish to far-end receipt to a millisecond at
-the median and five at the 99th percentile, apart from load.
+The module's timing program, `tests/measured`, holds publish to far-end
+receipt to a millisecond at the median and five at the 99th percentile,
+apart from load.
 
 ## The deduplication key
 
