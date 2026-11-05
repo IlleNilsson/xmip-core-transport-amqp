@@ -1,6 +1,6 @@
 //! The broker's side of one connection: what a Receive Location that
 //! accepts publishers directly runs, what a test puts at the far end, and
-//! what the playground stands up in place of a broker.
+//! what the essentials stands up in place of a broker.
 //!
 //! Not a broker. One session serves one client over one channel and keeps
 //! its queues in memory: what is published is stored under the queue it
