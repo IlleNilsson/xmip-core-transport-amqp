@@ -7,7 +7,7 @@ value encodings — short string, long string, field table — as the `Amqp` and
 `AmqpWrite` traits over
 [xmip-core-library-codec](https://github.com/IlleNilsson/xmip-core-library-codec)'s
 byte cursor and writer), `method`, `content` (the header and body frames), `client` and
-`session` (the far end a test or the playground stands up in place of a
+`session` (the far end a test or the essentials stands up in place of a
 broker). [xmip-core-transport-rabbitmq](https://github.com/IlleNilsson/xmip-core-transport-rabbitmq)
 speaks through them rather than carrying its own.
 
