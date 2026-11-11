@@ -52,6 +52,7 @@ pub use method::Method;
 use net::Target;
 pub use session::{Event, Publish, Queues, Session};
 use transport::ArrivalIdentity;
+use transport::destination;
 use transport::error::{Result, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
@@ -137,21 +138,18 @@ impl AmqpTransport {
 
     /// Where a target names the broker, exchange and key itself —
     /// `amqp://host:5672/exchange/routing.key` — or is a routing key alone
-    /// on this transport's broker and exchange.
+    /// on this transport's broker and exchange, or empty and this
+    /// transport's exchange and key (`transport::destination::named`).
     fn resolve<'a>(&'a self, target: &'a str) -> (&'a str, &'a str, &'a str) {
+        let Some(target) = destination::named(target) else {
+            return (&self.broker, &self.exchange, &self.routing_key);
+        };
         let Some(named) = Target::under(Self::SCHEMES, target) else {
             return (&self.broker, &self.exchange, target);
         };
         let (exchange, key) = named.path().split_once('/').unwrap_or(("", named.path()));
-        (
-            named.authority(),
-            exchange,
-            if key.is_empty() {
-                &self.routing_key
-            } else {
-                key
-            },
-        )
+        let key = destination::named(key).unwrap_or(&self.routing_key);
+        (named.authority(), exchange, key)
     }
 }
 
@@ -287,6 +285,12 @@ impl Configured for AmqpTransport {
 
     /// The schemes a Location's address is entered with to choose this technology.
     const SCHEMES: &'static [&'static str] = &["amqp"];
+
+    /// The exchange and routing key settings: the address names only the
+    /// broker.
+    fn own_target(_address: &str) -> &str {
+        destination::OWN
+    }
 
     fn configured(address: &str, settings: &xcore::settings::Read) -> Result<Self> {
         let text = |name| settings.optional_text(name).unwrap_or_default();
@@ -424,6 +428,30 @@ mod tests {
         assert_eq!(second.body, long, "many frames, one body");
         assert_eq!(second.queue(), "other/key.two");
         assert!(session.next_publish().expect("closed").is_none());
+        sender.join().expect("thread").expect("sending");
+    }
+
+    #[test]
+    fn a_send_location_publishes_to_its_exchange_and_key_and_a_target_naming_another_wins() {
+        let far_end = node();
+        let (listener, address) = far_end.bind().expect("binding");
+        let location = format!("amqp://{address}");
+        let sender = std::thread::spawn(move || {
+            let text = |name: &str, value: &str| (name.to_string(), Given::Text(value.to_string()));
+            let given = [
+                text("exchange", "orders"),
+                text("routing_key", "order.placed"),
+                text("timeout", "2s"),
+            ];
+            let near = AmqpTransport::open(&location, Applies::Send, &given)?;
+            near.send(AmqpTransport::own_target(&location), b"own")?;
+            near.send("order.cancelled", b"other")
+        });
+        let mut session = far_end.accept_one(&listener).expect("accepting");
+        let own = session.next_publish().expect("own").expect("one");
+        assert_eq!(own.queue(), "orders/order.placed");
+        let other = session.next_publish().expect("other").expect("one");
+        assert_eq!(other.queue(), "orders/order.cancelled");
         sender.join().expect("thread").expect("sending");
     }
 
