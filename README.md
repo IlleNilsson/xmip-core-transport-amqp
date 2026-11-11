@@ -23,6 +23,8 @@ A delivery is acknowledged after the runtime's whole receive cycle, never on its
 
 A send target is read by `net::Target` in [xmip-core-library-net](https://github.com/IlleNilsson/xmip-core-library-net), the one reading of a URI every technology calls. Until 2026-09-28 this technology stripped its scheme by hand.
 
+A Send Location publishes through the exchange and under the routing key its `exchange` and `routing_key` settings name, on the broker its address names: it sends to the empty target (`Configured::own_target`, `transport::destination::OWN`), which it reads, through `transport::destination::named`, as those two. A target naming another still wins — `order.cancelled`, or `amqp://host:5672/orders/order.cancelled` (ADR-0064, amendment 2026-11-10).
+
 ## Properties, publisher confirms, and the event capability's wire events
 
 A content header carries four of the basic class's properties
