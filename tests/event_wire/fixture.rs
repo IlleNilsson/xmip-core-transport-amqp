@@ -17,7 +17,7 @@ use event::binding::Binding;
 use event::filter::Filter;
 use event::hub::{EventSubscription, Hub};
 use event::outcome::Outcome;
-use event::subscriber::Subscriber;
+use event::subscriber::fixture;
 use node::Stage;
 use xcore::{JourneyId, PartyId};
 use xmip_core_transport_amqp::event_wire::{EventWire, Exchange, carried};
@@ -51,7 +51,7 @@ pub fn audit_at(name: &str) -> PathBuf {
 pub fn subscribed(hub: &Hub, at: &Path) -> EventSubscription {
     let audit = ProgramAudit::new("xmip-core-transport-amqp tests", Some(at));
     hub.subscribe(
-        Subscriber::in_process(PARTY, audit),
+        fixture::subscriber(&fixture::party(PARTY), audit),
         Filter::everything(),
         0,
     )
