@@ -13,14 +13,14 @@ use std::time::{Duration, Instant};
 use audit::program_audit::ProgramAudit;
 use authorize_party::PartyPolicy;
 use event::Event;
-use event::binding::Binding;
+use event::binding::Rules;
 use event::filter::Filter;
 use event::outcome::Outcome;
 use node::Stage;
 use xcluster::delivery::hub::{EventSubscription, Hub};
 use xcluster::delivery::subscriber::fixture;
 use xcore::{JourneyId, PartyId};
-use xmip_core_transport_amqp::event_wire::{EventWire, Exchange, carried};
+use xmip_core_transport_amqp::event_wire::{AmqpEventRules, EventWire, Exchange, carried};
 use xmip_core_transport_amqp::{Credentials, Publish, Session};
 
 /// The subscriber, a remote Party.
@@ -109,7 +109,7 @@ pub fn wire(address: &str) -> EventWire {
 }
 
 pub fn read_back(publish: &Publish) -> Event {
-    let wire_event = Binding::Amqp
+    let wire_event = AmqpEventRules
         .read(&carried(&publish.properties, &publish.body))
         .expect("a WireEvent");
     wire_event.event().expect("an Xmip Event")

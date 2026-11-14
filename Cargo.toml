@@ -25,8 +25,9 @@ context = { package = "xmip-core-context", git = "https://github.com/IlleNilsson
 # The estate's encoding primitives: the byte cursor and writer AMQP 0-9-1 is read and written over.
 codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main" }
 # The event capability's wire (ADR-0065 clause 3): the Wire this crate
-# implements and the Carried it puts in a message's properties — the
-# wire event's AMQP binding is written there, once. Every node links it
+# implements, the Carried it puts in a message's properties and the Rules
+# its AMQP binding answers by — the two modes over them are written
+# there, once, and the AMQP binding's prefixes here. Every node links it
 # already, through the runtime; a Technology may depend on Foundation
 # (repository-model.md section 4).
 event = { package = "xmip-core-event", git = "https://github.com/IlleNilsson/xmip-core-event", branch = "main" }

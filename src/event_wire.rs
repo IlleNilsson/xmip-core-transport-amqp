@@ -3,11 +3,15 @@
 //! subscription over (ADR-0065 clause 3), and the read side a receiving
 //! Xmip turns a delivery back into an event with.
 //!
-//! What goes on the message is decided once, in `xmip-core-event`'s
-//! binding: this file only puts a [`Carried`] where AMQP carries it — the
-//! body as the message body, the content type as the basic class's
-//! content-type property, and every `cloudEvents_` attribute in the
-//! headers field table — and takes it back off a delivery the same way.
+//! **The AMQP protocol binding's rules are here** ([`AmqpEventRules`],
+//! 1.0.2): an attribute is carried under `cloudEvents_` and its name,
+//! matched exactly, its value as it is; `cloudEvents:`, the prefix before
+//! 1.0.2, is read too. The two modes over them are `xmip-core-event`'s, once
+//! (`event::binding::Rules`). This file puts the [`Carried`] they write
+//! where AMQP carries it — the body as the message body, the content type
+//! as the basic class's content-type property, and every `cloudEvents_`
+//! attribute in the headers field table — and takes it back off a
+//! delivery the same way.
 //!
 //! **0-9-1, not 1.0.** The standard's AMQP protocol binding is written
 //! for AMQP 1.0, where the attributes are application-properties. This
@@ -32,7 +36,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use event::binding::Carried;
+use event::binding::{Carried, Rules};
 use event::wire::Wire;
 use transport::Pool;
 use xcore::Failure;
@@ -40,6 +44,29 @@ use xcore::PartyId;
 
 use crate::client::{Client, Credentials};
 use crate::content::Properties;
+
+/// The prefix an attribute's name carries in the headers table (1.0.2).
+pub const PREFIX: &str = "cloudEvents_";
+
+/// The prefix before 1.0.2, read and never written.
+pub const EARLIER_PREFIX: &str = "cloudEvents:";
+
+/// The AMQP protocol binding's rules: `cloudEvents_` names, or the
+/// earlier `cloudEvents:`, matched exactly, each value as it is.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AmqpEventRules;
+
+impl Rules for AmqpEventRules {
+    fn prefix(&self) -> &'static str {
+        PREFIX
+    }
+
+    fn attribute<'h>(&self, header: &'h str) -> Option<&'h str> {
+        header
+            .strip_prefix(PREFIX)
+            .or_else(|| header.strip_prefix(EARLIER_PREFIX))
+    }
+}
 
 /// Where one Party's events are published, and the credentials presented
 /// there.
@@ -114,6 +141,10 @@ impl Default for EventWire {
 }
 
 impl Wire for EventWire {
+    fn rules(&self) -> &dyn Rules {
+        &AmqpEventRules
+    }
+
     /// One persistent publish on the Party's exchange, confirmed.
     fn carry(&self, party: PartyId, carried: &Carried) -> Result<(), Failure> {
         let to = self.exchanges.get(&party).ok_or_else(|| {
@@ -150,8 +181,8 @@ pub fn properties(carried: &Carried) -> Properties {
     }
 }
 
-/// What a message with `properties` and `body` carries, for the binding
-/// to read a `WireEvent` from.
+/// What a message with `properties` and `body` carries, for
+/// [`AmqpEventRules`] to read a `WireEvent` from.
 #[must_use]
 pub fn carried(properties: &Properties, body: &[u8]) -> Carried {
     Carried {

@@ -43,8 +43,12 @@ a channel in confirm mode, and nacks the first few where told to
 
 On them rides the event capability (ADR-0065 clause 3):
 `event_wire::EventWire` implements
-[xmip-core-event](https://github.com/IlleNilsson/xmip-core-event)'s `Wire`
-and publishes what the event crate's AMQP binding wrote, persistent and
+[xmip-core-event](https://github.com/IlleNilsson/xmip-core-event)'s `Wire`,
+and the AMQP protocol binding's rules are here, `event_wire::AmqpEventRules`
+(ADR-0065, amendment 2026-11-14): `cloudEvents_` names, matched exactly,
+and `cloudEvents:`, the prefix before 1.0.2, read too. The wire answers
+them (`Wire::rules`), the event crate writes either mode over them, once,
+and the wire publishes what was written, persistent and
 confirmed: the content type in the content-type property and the
 `cloudEvents_` attributes in the **headers field table**. The wire event's
 AMQP binding is written for AMQP 1.0, where the attributes are
@@ -55,7 +59,7 @@ names and the prefix unchanged. The identity presented for a Party is the
 capability's `Login` and the virtual host. The connections to each Party
 are the capability's `Pool`, kept between events; one that fails is
 replaced and the event published again. `event_wire::carried` is the read side: a
-delivery's properties and body, as the binding reads a `WireEvent` from.
+delivery's properties and body, as `AmqpEventRules` reads a `WireEvent` from.
 The module's timing program, `tests/measured`, holds publish to far-end
 receipt to a millisecond at the median and five at the 99th percentile,
 apart from load.
