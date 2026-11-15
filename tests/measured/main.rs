@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use event::binding::Mode;
 use resilience::Guard;
 use retry::Retry;
+use transport::Configured;
 use transport::Transport;
 use xcluster::delivery::forward::Forwarder;
 use xcore::latency::{Rounds, spin};

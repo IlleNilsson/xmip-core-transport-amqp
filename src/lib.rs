@@ -102,14 +102,6 @@ impl AmqpTransport {
         self
     }
 
-    /// Give up on a peer that stops mid-frame, and stop receiving when the
-    /// broker has been quiet this long.
-    #[must_use]
-    pub const fn timing_out_after(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
-        self
-    }
-
     /// Connect to the broker.
     ///
     /// # Errors
@@ -272,14 +264,12 @@ impl Configured for AmqpTransport {
                           when left out.",
                 applies: Applies::Both,
             },
-            Setting {
-                name: "timeout",
-                kind: Kind::Duration,
-                presence: Presence::Optional,
-                meaning: "How long a peer that stops mid-frame is waited on, and how long a \
-                          receive waits on a quiet broker; unbounded when left out.",
-                applies: Applies::Both,
-            },
+            transport::configured::timeout(
+                Applies::Both,
+                None,
+                "How long a peer that stops mid-frame is waited on, and how long a \
+                 receive waits on a quiet broker; unbounded when left out.",
+            ),
         ],
     };
 
@@ -292,6 +282,10 @@ impl Configured for AmqpTransport {
         destination::OWN
     }
 
+    fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
+        Some(&mut self.timeout)
+    }
+
     fn configured(address: &str, settings: &xcore::settings::Read) -> Result<Self> {
         let text = |name| settings.optional_text(name).unwrap_or_default();
         // The user and password come through the Location's credentials.
@@ -299,17 +293,13 @@ impl Configured for AmqpTransport {
             Some(virtual_host) => Credentials::default().on(virtual_host),
             None => Credentials::default(),
         };
-        let transport = Self::new(
+        Ok(Self::new(
             address,
             text("exchange"),
             text("routing_key"),
             text("queue"),
         )
-        .logging_in(credentials);
-        Ok(match settings.optional_duration("timeout") {
-            Some(timeout) => transport.timing_out_after(timeout),
-            None => transport,
-        })
+        .logging_in(credentials))
     }
 }
 
@@ -567,11 +557,14 @@ mod tests {
             let mut arrived = Vec::new();
             while arrived.len() < 6 {
                 let now = receiving.receive()?;
-                if !now.is_empty() {
-                    taken.send(()).expect("told");
-                }
+                let any = !now.is_empty();
                 for one in now {
                     arrived.push(one.taken()?.bytes);
+                }
+                // Told once each is acked: told before, the broker could
+                // close the consumer first, and the ack find none to go on.
+                if any {
+                    taken.send(()).expect("told");
                 }
             }
             Ok::<_, transport::TransportError>(arrived)
