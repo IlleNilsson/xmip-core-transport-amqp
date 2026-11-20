@@ -52,7 +52,7 @@ fn the_amqp_binary_example_reads_with_either_prefix() {
 
 #[test]
 fn a_published_event_arrives_as_the_same_event_in_either_mode() {
-    let at = audit_at("modes");
+    let (_folder, at) = audit_at("modes");
     for mode in [Mode::Structured, Mode::Binary] {
         let hub = allowing();
         let (address, told) = far_end(0);
@@ -88,7 +88,7 @@ fn a_published_event_arrives_as_the_same_event_in_either_mode() {
 
 #[test]
 fn a_broker_that_refuses_is_retried_and_the_events_arrive_in_order() {
-    let at = audit_at("again");
+    let (_folder, at) = audit_at("again");
     let hub = allowing();
     let (address, told) = far_end(2);
     let subscription = subscribed(&hub, &at);
