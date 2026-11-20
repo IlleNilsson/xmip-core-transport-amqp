@@ -11,12 +11,12 @@ use std::time::{Duration, Instant};
 
 use audit::program_audit::ProgramAudit;
 use audit_file::FileSink;
+use audit_file::temporary::Folder;
 use authorize_party::PartyPolicy;
 use event::Event;
 use event::binding::Rules;
 use event::filter::Filter;
 use event::outcome::Outcome;
-use file::temporary::Folder;
 use node::Stage;
 use xcluster::delivery::hub::{EventSubscription, Hub};
 use xcluster::delivery::subscriber::fixture;
@@ -42,7 +42,8 @@ pub fn login() -> Credentials {
 }
 
 /// A temporary audit directory of its own, not made yet and never the
-/// estate's, in a folder removed when the test ends.
+/// estate's, in a folder removed when the test ends, once audit's keeper
+/// kept what was handed to it.
 pub fn audit_at(name: &str) -> (Folder, PathBuf) {
     let folder = Folder::new(&format!("amqp-{name}"));
     let at = folder.join("audit");
