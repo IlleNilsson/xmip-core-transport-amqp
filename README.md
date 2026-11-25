@@ -15,7 +15,17 @@ A Send Location publishes on a connection kept per broker
 (`transport::Pool`), its channel in confirm mode, and a publish returns
 once the broker confirms it; until 2026-09-27 every send connected,
 published without a confirm and closed. What a Location presents is
-`Credentials`: the transport capability's `Login` and the virtual host.
+`Credentials`: the transport capability's `Login` and the virtual host,
+kept with the secret the Location names in `Presenting`, which the
+`rabbitmq` technology keeps its own in too. The PLAIN login presents the
+Location's `user` with the password the secret holds, read as each
+connection opens, never per Message on a kept one (ADR-0019, amendment
+2026-11-25); a Location that names no secret presents its `user` with an
+empty password, one that names no `user` logs in as the broker's default
+guest, and one that names a secret and no `user` is refused as the node
+starts. Until 2026-11-25 a Location naming a secret was refused as the
+node started, and every Location logged in as guest. The far end `Session`
+admits only the login it is given, closing with 403 `ACCESS_REFUSED`.
 
 A Receive Location declares and consumes its queue once, on its first receive, and the consumer stays attached between receives; each receive takes what came until the broker is quiet for the timeout (`Client::consuming`, `Client::next_delivery`, `transport::pool::delivered`). A consumer the broker closed is replaced. Until 2026-09-28 every receive connected, declared, consumed and closed.
 

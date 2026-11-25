@@ -18,8 +18,9 @@
 //! publish with a content header, consume and acknowledge — the one AMQP
 //! 0-9-1 in the estate: `wire` is the frame and its value encodings,
 //! `method` the methods, `content` the header and body frames, `client`
-//! and `session` the two ends. The `rabbitmq` technology speaks through
-//! them. Publisher confirms are `confirm`'s, since 2026-09-26. Transactions,
+//! and `session` the two ends, and [`presenting`] who a Location logs in
+//! as, the password the secret it names holds, read as it connects. The
+//! `rabbitmq` technology speaks through them. Publisher confirms are `confirm`'s, since 2026-09-26. Transactions,
 //! TLS and AMQP 1.0 — a different protocol under the same name — are the
 //! next layers.
 //!
@@ -38,6 +39,7 @@ pub mod confirm;
 pub mod content;
 pub mod event_wire;
 pub mod method;
+pub mod presenting;
 pub mod session;
 pub mod wire;
 
@@ -50,6 +52,7 @@ use content::Properties;
 use context::property::AMQP_USER_ID;
 pub use method::Method;
 use net::Target;
+pub use presenting::Presenting;
 pub use session::{Event, Publish, Queues, Session};
 use transport::ArrivalIdentity;
 use transport::destination;
@@ -58,7 +61,7 @@ use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::pool::delivered;
 use transport::socket;
-use transport::{Arrived, Configured, Directions, Headers, Pool, Taken, Transport};
+use transport::{Arrived, Configured, Directions, Headers, Login, Pool, Taken, Transport};
 pub use wire::Frame;
 use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
 
@@ -68,7 +71,9 @@ pub struct AmqpTransport {
     exchange: String,
     routing_key: String,
     queue: String,
-    credentials: Credentials,
+    /// Who it logs in as, and the secret its Location names, whose
+    /// password its login presents, read at each connection.
+    presenting: Presenting,
     timeout: Option<Duration>,
     /// The connections a send publishes on, each with its channel open and
     /// in confirm mode: connected once per broker and kept.
@@ -88,26 +93,34 @@ impl AmqpTransport {
             exchange: exchange.to_string(),
             routing_key: routing_key.to_string(),
             queue: queue.to_string(),
-            credentials: Credentials::default(),
+            presenting: Presenting::default(),
             timeout: None,
             publishers: Pool::new(),
             consumers: Pool::new(),
         }
     }
 
-    /// Present these when connecting.
+    /// Log in as `login` when connecting, and expect it when accepting.
     #[must_use]
-    pub fn logging_in(mut self, credentials: Credentials) -> Self {
-        self.credentials = credentials;
+    pub fn logging_in(mut self, login: Login) -> Self {
+        self.presenting = self.presenting.logging_in(login);
         self
     }
 
     /// Connect to the broker.
     ///
     /// # Errors
-    /// Where the broker refused or could not be reached.
+    /// Where the Location's secret could not be presented, or the broker
+    /// refused or could not be reached.
     pub fn connect(&self) -> Result<Client> {
-        Client::connect(&self.broker, &self.credentials, self.timeout)
+        self.connect_to(&self.broker)
+    }
+
+    /// Connect to `broker`, the password the Location's secret holds read
+    /// now where it names one: each new connection reads it, a kept one
+    /// never again.
+    fn connect_to(&self, broker: &str) -> Result<Client> {
+        Client::connect(broker, &self.presenting.presented("amqp")?, self.timeout)
     }
 
     /// Bind as the far end clients connect to, and report the address.
@@ -125,7 +138,7 @@ impl AmqpTransport {
     /// Where the connection could not be accepted, the handshake failed,
     /// or the client was refused.
     pub fn accept_one(&self, listener: &TcpListener) -> Result<Session> {
-        Session::accept(listener, &self.credentials, self.timeout)
+        Session::accept(listener, self.presenting.expected(), self.timeout)
     }
 
     /// Where a target names the broker, exchange and key itself —
@@ -222,15 +235,15 @@ impl AmqpTransport {
         let properties = Properties::octets(false).keyed(key);
         self.publishers.exchange(
             broker,
-            || Client::connect(broker, &self.credentials, self.timeout),
+            || self.connect_to(broker),
             |client| client.publish_confirmed(exchange, routing_key, &properties, bytes),
         )
     }
 }
 
 impl Configured for AmqpTransport {
-    /// The address is the broker, `host:5672`. The user and password are
-    /// the Location's credentials, not settings: a secret never is.
+    /// The address is the broker, `host:5672`. The password is the secret
+    /// the Location names, never a setting.
     const SETTINGS: &'static Settings = &Settings {
         technology: env!("CARGO_PKG_NAME"),
         settings: &[
@@ -257,13 +270,14 @@ impl Configured for AmqpTransport {
                 applies: Applies::Send,
             },
             Setting {
-                name: "virtual_host",
+                name: presenting::VIRTUAL_HOST,
                 kind: Kind::Text,
                 presence: Presence::Optional,
                 meaning: "The broker's virtual host connected to; the default virtual host \
                           when left out.",
                 applies: Applies::Both,
             },
+            presenting::USER,
             transport::configured::timeout(
                 Applies::Both,
                 None,
@@ -288,18 +302,22 @@ impl Configured for AmqpTransport {
 
     fn configured(address: &str, settings: &xcore::settings::Read) -> Result<Self> {
         let text = |name| settings.optional_text(name).unwrap_or_default();
-        // The user and password come through the Location's credentials.
-        let credentials = match settings.optional_text("virtual_host") {
-            Some(virtual_host) => Credentials::default().on(virtual_host),
-            None => Credentials::default(),
-        };
-        Ok(Self::new(
-            address,
-            text("exchange"),
-            text("routing_key"),
-            text("queue"),
-        )
-        .logging_in(credentials))
+        Ok(Self {
+            presenting: Presenting::configured(settings),
+            ..Self::new(
+                address,
+                text("exchange"),
+                text("routing_key"),
+                text("queue"),
+            )
+        })
+    }
+
+    /// The password the Location's secret holds, beside its `user`, read
+    /// at each connection; a secret named without a user is refused.
+    fn secured_by(mut self, secret: transport::Secured) -> Result<Self> {
+        self.presenting = self.presenting.secured_by(secret)?;
+        Ok(self)
     }
 }
 
@@ -381,12 +399,26 @@ mod tests {
         assert_eq!(sent.broker, "broker:5672");
         assert_eq!(sent.exchange, "orders");
         assert_eq!(sent.routing_key, "order.placed");
-        assert_eq!(sent.credentials.virtual_host, "trade");
+        assert_eq!(sent.presenting.expected().virtual_host, "trade");
         assert_eq!(sent.timeout, Some(Duration::from_secs(2)));
-        let received = AmqpTransport::open("broker:5672", Applies::Receive, &[text("queue", "in")])
-            .expect("built");
+        let given = [text("queue", "in"), text("user", "orders")];
+        let received = AmqpTransport::open("broker:5672", Applies::Receive, &given).expect("built");
         assert_eq!(received.queue, "in");
-        assert_eq!(received.credentials.virtual_host, "/");
+        let expected = received.presenting.expected();
+        assert_eq!(expected.virtual_host, "/");
+        assert_eq!(
+            (
+                expected.login.user.as_str(),
+                expected.login.password.as_str()
+            ),
+            ("orders", ""),
+            "the password is the Location's secret, none named here"
+        );
+        assert_eq!(
+            sent.presenting.expected().login,
+            Credentials::default().login,
+            "no user named: the broker's default guest"
+        );
         let Err(refused) = AmqpTransport::open("broker:5672", Applies::Receive, &[]) else {
             panic!("a Receive Location's queue is required");
         };
@@ -640,7 +672,7 @@ mod tests {
         assert!(arrived.is_empty());
         let stranger = std::thread::spawn(move || {
             AmqpTransport::new(address, "e", "k", "q")
-                .logging_in(Credentials::new("guest", "wrong"))
+                .logging_in(Login::new("guest", "wrong"))
                 .timing_out_after(Duration::from_secs(2))
                 .connect()
                 .err()
@@ -679,6 +711,67 @@ mod tests {
         assert_eq!(code, 403);
         let refused = serving.join().expect("the far end").expect("refused");
         assert!(refused.message.contains("403"), "{refused}");
+    }
+
+    /// A Send Location of the broker at `address` logging in as `orders`,
+    /// its password the secret `partner-x.amqp` that `kept` holds.
+    fn secured(address: &str, kept: &std::sync::Arc<transport::secured::Kept>) -> AmqpTransport {
+        let text = |name: &str, value: &str| (name.to_string(), Given::Text(value.to_string()));
+        let given = [
+            text("exchange", "orders"),
+            text("user", "orders"),
+            text("timeout", "2s"),
+        ];
+        AmqpTransport::open(&format!("amqp://{address}"), Applies::Send, &given)
+            .expect("built")
+            .secured_by(kept.secured("partner-x.amqp"))
+            .expect("a user is named")
+    }
+
+    #[test]
+    fn the_password_is_the_locations_secret_read_at_each_connection() {
+        use transport::secured::Kept;
+        use xcore::SecretKind::Password;
+        let kept = std::sync::Arc::new(Kept::default());
+        let drawn = Kept::drawn();
+        let far_end = node().logging_in(Login::new("orders", &drawn));
+        let (listener, address) = far_end.bind().expect("binding");
+        let near = secured(&address, &kept);
+        let unset = near.send("order.placed", b"x").expect_err("not set");
+        assert!(unset.retryable, "asked again at the next connection");
+        assert!(
+            unset.message.contains("'partner-x.amqp' is not set"),
+            "{unset}"
+        );
+
+        kept.set("partner-x.amqp", Password, &format!("{drawn}-wrong"));
+        let sending = near.clone();
+        let sender = std::thread::spawn(move || sending.send("order.placed", b"x").err());
+        let refused = far_end.accept_one(&listener).err().expect("refused");
+        assert!(refused.message.contains("403"), "{refused}");
+        let wrong = sender.join().expect("thread").expect("refused");
+        assert!(wrong.message.contains("403 ACCESS_REFUSED"), "{wrong}");
+        assert!(!wrong.retryable, "{wrong}");
+
+        kept.set("partner-x.amqp", Password, &drawn);
+        let sending = near.clone();
+        let sender = std::thread::spawn(move || sending.send("order.placed", b"right"));
+        let mut session = far_end.accept_one(&listener).expect("admitted");
+        assert_eq!(session.user(), "orders");
+        let published = session.next_publish().expect("published").expect("one");
+        assert_eq!(published.body, b"right");
+        sender.join().expect("thread").expect("sent");
+    }
+
+    #[test]
+    fn a_secret_named_without_a_user_is_refused_as_the_node_starts() {
+        let kept = std::sync::Arc::new(transport::secured::Kept::default());
+        let built = AmqpTransport::open("broker:5672", Applies::Send, &[]).expect("built");
+        let Err(refused) = built.secured_by(kept.secured("partner-x.amqp")) else {
+            panic!("no user is named");
+        };
+        assert!(!refused.retryable);
+        assert!(refused.message.contains("\"user\" setting"), "{refused}");
     }
 
     #[test]
