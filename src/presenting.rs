@@ -10,11 +10,20 @@
 //! user logs in as the broker's default guest, as it always did, and one
 //! that names a secret and no user is refused as the node starts, since the
 //! secret would go out as guest's password.
+//!
+//! [`USER`] and [`VIRTUAL_HOST`] are the declaration, built with the
+//! `declaration` feature alone; `Presenting` is code, behind the default
+//! feature.
 
+#[cfg(feature = "default")]
 use transport::error::Result;
+#[cfg(feature = "default")]
 use transport::{Login, Secured, secured};
-use xcore::settings::{Applies, Kind, Presence, Read, Setting};
+#[cfg(feature = "default")]
+use xcore::settings::Read;
+use xcore::settings::{Applies, Kind, Presence, Setting};
 
+#[cfg(feature = "default")]
 use crate::client::Credentials;
 
 /// The `user` setting, as AMQP and `RabbitMQ` each declare it.
@@ -32,6 +41,7 @@ pub const USER: Setting = Setting {
 pub const VIRTUAL_HOST: &str = "virtual_host";
 
 /// What a Location presents as it connects, and what a far end expects.
+#[cfg(feature = "default")]
 #[derive(Clone, Debug)]
 pub struct Presenting {
     credentials: Credentials,
@@ -40,6 +50,7 @@ pub struct Presenting {
     secret: Option<Secured>,
 }
 
+#[cfg(feature = "default")]
 impl Default for Presenting {
     /// The broker's default guest on the default virtual host, as a
     /// Location that names no user logs in.
@@ -52,6 +63,7 @@ impl Default for Presenting {
     }
 }
 
+#[cfg(feature = "default")]
 impl Presenting {
     /// Logging in as `login`, on the same virtual host: a far end's
     /// expected login, or a test's.

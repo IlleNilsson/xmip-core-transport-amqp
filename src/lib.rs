@@ -32,39 +32,71 @@
 //! type in the basic properties, the `cloudEvents_` attributes in the
 //! headers field table, 0-9-1's equivalent of the 1.0 binding's
 //! application-properties — and reads one back off a delivery.
+//!
+//! **Built with its `declaration` feature alone** the crate is
+//! [`declaration`], what a Location of it is configured with, and
+//! [`presenting`]'s `user` and `virtual_host`, which `rabbitmq` declares
+//! too, and none of the code above, which is behind the default feature:
+//! what the surfaces' library carries (ADR-0064, amendment 2026-11-26).
 
+#[cfg(feature = "default")]
 pub mod acknowledging;
+#[cfg(feature = "default")]
 pub mod client;
+#[cfg(feature = "default")]
 pub mod confirm;
+#[cfg(feature = "default")]
 pub mod content;
+#[cfg(feature = "declaration")]
+pub mod declaration;
+#[cfg(feature = "default")]
 pub mod event_wire;
+#[cfg(feature = "default")]
 pub mod method;
+#[cfg(feature = "declaration")]
 pub mod presenting;
+#[cfg(feature = "default")]
 pub mod session;
+#[cfg(feature = "default")]
 pub mod wire;
 
+#[cfg(feature = "default")]
 use std::net::TcpListener;
+#[cfg(feature = "default")]
 use std::time::Duration;
 
+#[cfg(feature = "default")]
 pub use acknowledging::acknowledging;
+#[cfg(feature = "default")]
 pub use client::{Client, Credentials, Delivery};
+#[cfg(feature = "default")]
 use content::Properties;
+#[cfg(feature = "default")]
 use context::property::AMQP_USER_ID;
+#[cfg(feature = "default")]
 pub use method::Method;
+#[cfg(feature = "default")]
 use net::Target;
+#[cfg(feature = "default")]
 pub use presenting::Presenting;
+#[cfg(feature = "default")]
 pub use session::{Event, Publish, Queues, Session};
-use transport::ArrivalIdentity;
-use transport::destination;
+#[cfg(feature = "default")]
 use transport::error::{Result, protocol_error};
+#[cfg(feature = "default")]
 use transport::listening::{Accepting, Listening};
+#[cfg(feature = "default")]
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
-use transport::pool::delivered;
-use transport::socket;
+#[cfg(feature = "default")]
+use transport::{ArrivalIdentity, destination, pool::delivered, socket};
+#[cfg(feature = "default")]
 use transport::{Arrived, Configured, Directions, Headers, Login, Pool, Taken, Transport};
+#[cfg(feature = "default")]
 pub use wire::Frame;
-use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
+#[cfg(feature = "default")]
+use xcore::settings::Settings;
 
+#[cfg(feature = "default")]
 #[derive(Clone)]
 pub struct AmqpTransport {
     broker: String,
@@ -83,6 +115,7 @@ pub struct AmqpTransport {
     consumers: Pool<Client>,
 }
 
+#[cfg(feature = "default")]
 impl AmqpTransport {
     /// Speak to the broker at `broker`: consume `queue`, publish to
     /// `exchange` under `routing_key`.
@@ -158,6 +191,7 @@ impl AmqpTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Transport for AmqpTransport {
     fn name(&self) -> &'static str {
         "amqp"
@@ -227,6 +261,7 @@ impl Transport for AmqpTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl AmqpTransport {
     /// The one send: `bytes` published to `target` and confirmed, under
     /// `key` as its message-id where there is one.
@@ -241,54 +276,10 @@ impl AmqpTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Configured for AmqpTransport {
-    /// The address is the broker, `host:5672`. The password is the secret
-    /// the Location names, never a setting.
-    const SETTINGS: &'static Settings = &Settings {
-        technology: env!("CARGO_PKG_NAME"),
-        settings: &[
-            Setting {
-                name: "queue",
-                kind: Kind::Text,
-                presence: Presence::Required,
-                meaning: "The queue a Receive Location declares and consumes.",
-                applies: Applies::Receive,
-            },
-            Setting {
-                name: "exchange",
-                kind: Kind::Text,
-                presence: Presence::Optional,
-                meaning: "The exchange a Send Location publishes to; the broker's default \
-                          exchange when left out.",
-                applies: Applies::Send,
-            },
-            Setting {
-                name: "routing_key",
-                kind: Kind::Text,
-                presence: Presence::Optional,
-                meaning: "The routing key published under when a send target names none.",
-                applies: Applies::Send,
-            },
-            Setting {
-                name: presenting::VIRTUAL_HOST,
-                kind: Kind::Text,
-                presence: Presence::Optional,
-                meaning: "The broker's virtual host connected to; the default virtual host \
-                          when left out.",
-                applies: Applies::Both,
-            },
-            presenting::USER,
-            transport::configured::timeout(
-                Applies::Both,
-                None,
-                "How long a peer that stops mid-frame is waited on, and how long a \
-                 receive waits on a quiet broker; unbounded when left out.",
-            ),
-        ],
-    };
-
-    /// The schemes a Location's address is entered with to choose this technology.
-    const SCHEMES: &'static [&'static str] = &["amqp"];
+    const SETTINGS: &'static Settings = declaration::SETTINGS;
+    const SCHEMES: &'static [&'static str] = declaration::SCHEMES;
 
     /// The exchange and routing key settings: the address names only the
     /// broker.
@@ -321,6 +312,7 @@ impl Configured for AmqpTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl AmqpTransport {
     /// Both ends on this machine: an ephemeral local port, the loopback
     /// timeout, an exchange, a routing key and a queue each called `probe`.
@@ -330,6 +322,7 @@ impl AmqpTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Accepting for AmqpTransport {
     fn take_one(self, listener: &TcpListener) -> Result<Taken> {
         let mut session = self.accept_one(listener)?;
@@ -348,6 +341,7 @@ impl Accepting for AmqpTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Loopback for AmqpTransport {
     fn arrival_identity(&self) -> ArrivalIdentity {
         ArrivalIdentity::Unnamed(
@@ -374,7 +368,7 @@ impl Loopback for AmqpTransport {
 mod tests {
     use super::*;
     use transport::payload::{edge_payloads, sized_payloads};
-    use xcore::settings::Given;
+    use xcore::settings::{Applies, Given};
 
     fn node() -> AmqpTransport {
         AmqpTransport::new("127.0.0.1:0", "orders", "order.placed", "orders.in")
